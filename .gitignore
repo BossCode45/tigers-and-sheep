@@ -1,0 +1,12 @@
+# Cargo build output
+/target
+
+# Nix build output symlinks (nix build)
+/result
+/result-*
+
+# direnv cache
+/.direnv
+
+# Temporary removing github workflows
+.github

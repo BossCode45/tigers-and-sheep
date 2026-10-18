@@ -1,0 +1,10 @@
+* Minimax improvements
+** DONE Alpha beta pruning
+- Move ordering too
+  - Probably after iterative deepening
+** DONE Score caching
+** Move generation caching?
+** DONE Iterative deepening
+- Use results of previous searches for move ordering
+** Profile to see what needs optimization the most
+* Draws

@@ -1,0 +1,8 @@
+[package]
+name = "tigers-and-sheep-rs"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "tigers-and-sheep-rs"
+path = "src/main.rs"
