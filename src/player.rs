@@ -1,10 +1,63 @@
 use std::{collections::HashMap, time::{Duration, Instant}};
 
-use crate::board::{GameBoard, Move, Turn};
+use ratatui::{buffer::Buffer, crossterm::event::KeyEvent, layout::Rect, widgets::{Paragraph, Widget}};
 
+use crate::board::{GameBoard, Move, Pos, Turn};
+
+/// Input the game coordinator passes on to the player whose turn it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Input
+{
+	/// A click on a board point.
+	Click(Pos),
+	Key(KeyEvent),
+}
+
+/// Points for the coordinator to highlight on the board.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Highlights
+{
+	pub selected: Option<Pos>,
+	pub targets: Vec<Pos>,
+}
+
+/// A side in the game. The coordinator calls `pick_move` once per loop while it's this player's
+/// turn, and passes on input with `handle_input`; whichever returns a move first plays it.
 pub trait Player
 {
-	fn pick_move(&mut self, board: GameBoard, turn: Turn) -> Move;
+	fn name(&self) -> String;
+
+	/// Called before each draw while it's this player's turn, with the position to play.
+	fn update(&mut self, _board: GameBoard, _turn: Turn) {}
+
+	/// Computer players search here and return Some. Interactive players return None and
+	/// wait for `handle_input`.
+	fn pick_move(&mut self, _board: GameBoard, _turn: Turn) -> Option<Move> { None }
+
+	/// A click on a board point, or a key press, while it's this player's turn.
+	fn handle_input(&mut self, _input: Input, _board: GameBoard, _turn: Turn) -> Option<Move> { None }
+
+	/// Points for the coordinator to highlight on the board.
+	fn highlights(&self) -> Highlights { Highlights::default() }
+
+	/// Drop any half-made selection, e.g. after a move or a revert.
+	fn reset(&mut self) {}
+
+	/// Draw into the player-output panel. By default this shows the player's name.
+	fn render(&self, area: Rect, buf: &mut Buffer)
+	{
+		Paragraph::new(self.name()).render(area, buf);
+	}
+}
+
+/// Every player is a ratatui widget through `Player::render`.
+/// (A blanket `impl<P: Player> Widget for &P` would break the orphan rule.)
+impl Widget for &dyn Player
+{
+	fn render(self, area: Rect, buf: &mut Buffer)
+	{
+		Player::render(self, area, buf);
+	}
 }
 
 pub type ScoreType = f32;
@@ -175,14 +228,17 @@ pub trait MinimaxPlayer
 
 	/// How long `pick_move` may spend searching.
 	fn time_limit(&self) -> Duration { Duration::from_secs(1) }
+
+	fn name(&self) -> String { "Computer".to_string() }
 }
 
 impl<P: MinimaxPlayer> Player for P
 {
-	
+	fn name(&self) -> String { MinimaxPlayer::name(self) }
+
 	/// Iterative deepening: searches depth 1, 2, … until time runs out, each depth trying the
 	/// previous one's best moves first, and plays the best move from the deepest finished search.
-	fn pick_move(&mut self, board: GameBoard, turn: Turn) -> Move {
+	fn pick_move(&mut self, board: GameBoard, turn: Turn) -> Option<Move> {
 		let start = Instant::now();
 		let time_limit = self.time_limit();
 		let deadline = start + time_limit;
@@ -210,8 +266,13 @@ impl<P: MinimaxPlayer> Player for P
 				break;
 			}
 		}
-		best.expect("pick_move called with no legal moves")
+		Some(best.expect("pick_move called with no legal moves"))
     }
+
+	fn render(&self, area: Rect, buf: &mut Buffer)
+	{
+		Paragraph::new(format!("{}\n\nThinking…", MinimaxPlayer::name(self))).render(area, buf);
+	}
     
 }
 
@@ -366,7 +427,7 @@ mod tests
 		player.time_limit = Duration::from_millis(50);
 		let board = GameBoard::default();
 		let start = Instant::now();
-		let m = player.pick_move(board, Turn::Sheep);
+		let m = player.pick_move(board, Turn::Sheep).unwrap();
 		assert!(start.elapsed() < Duration::from_millis(500), "took {:?}", start.elapsed());
 		assert_eq!(board.check_move(m), Ok(()));
 	}
@@ -380,7 +441,7 @@ mod tests
 			{
 				let mut player = TestPlayer::new(4, cached);
 				let best = reference(&mut player, board, turn, 4);
-				let m = player.pick_move(board, turn);
+				let m = player.pick_move(board, turn).unwrap();
 				let score = reference(&mut player, board.after_move_unchecked(m), turn.next_turn(), 3);
 				assert_eq!(score, best, "{turn:?} picked {m:?} (cached: {cached})");
 			}
@@ -413,7 +474,7 @@ mod tests
 
 		for cached in [false, true]
 		{
-			let m = TestPlayer::new(3, cached).pick_move(board, Turn::Tiger);
+			let m = TestPlayer::new(3, cached).pick_move(board, Turn::Tiger).unwrap();
 			assert!(board.after_move_unchecked(m).check_win(Turn::Sheep), "picked {m:?} (cached: {cached})");
 		}
 	}

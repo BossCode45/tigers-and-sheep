@@ -5,14 +5,20 @@ use crate::{claude_player::ClaudePlayer, game::GameHandler, local_player::LocalP
 mod board;
 mod player;
 mod game;
+#[path = "board-view.rs"]
+mod board_view;
 #[path = "local-player.rs"]
 mod local_player;
 #[path = "claude-player.rs"]
 mod claude_player;
 
-fn main() {
+fn main() -> std::io::Result<()> {
 	let mut game = GameHandler::default();
 	// I play sheep, claude plays tiger
-	let winner = game.play_game(&mut LocalPlayer, &mut ClaudePlayer::new(Duration::from_secs(2)));
-	println!("{winner:?} wins!");
+	let winner = game.play_game(&mut LocalPlayer::default(), &mut ClaudePlayer::new(Duration::from_secs(2)))?;
+	if let Some(winner) = winner
+	{
+		println!("{winner:?} wins!");
+	}
+	Ok(())
 }

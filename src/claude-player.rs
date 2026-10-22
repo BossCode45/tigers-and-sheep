@@ -1,6 +1,6 @@
 use std::{collections::HashMap, time::Duration};
 
-use crate::{board::{GameBoard, Move, PieceType, Turn}, player::{CacheEntry, MinimaxPlayer}};
+use crate::{board::{is_jump, GameBoard, Move, PieceType, Turn}, player::{CacheEntry, MinimaxPlayer}};
 
 /// Sheep that start the game: on the board plus in hand.
 const TOTAL_SHEEP: u32 = 20;
@@ -61,19 +61,11 @@ impl MinimaxPlayer for ClaudePlayer
 			+ 2.0 * tiger_moves.len() as f32
 	}
 
+	fn name(&self) -> String { "Claude".to_string() }
+
 	fn time_limit(&self) -> Duration { self.time_limit }
 
 	fn cache(&mut self) -> Option<&mut dyn crate::player::ScoreCache> {
 		Some(&mut self.cache)
-	}
-}
-
-/// True for a tiger move of two points, which always jumps (and kills) a sheep.
-fn is_jump(mv: Move) -> bool
-{
-	match mv
-	{
-		Move::MoveTiger { from: (fx, fy), to: (tx, ty) } => fx.abs_diff(tx) == 2 || fy.abs_diff(ty) == 2,
-		_ => false,
 	}
 }

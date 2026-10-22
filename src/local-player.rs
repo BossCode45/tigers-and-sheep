@@ -1,156 +1,148 @@
-use std::io::{self, BufRead, Write};
+use ratatui::{buffer::Buffer, layout::Rect, style::{Color, Style}, text::{Line, Text}, widgets::{Paragraph, Widget, Wrap}};
 
-use crate::{board::{GameBoard, Move, PieceType, Turn}, player::Player};
+use crate::{board::{GameBoard, Move, PieceType, Pos, Turn}, player::{Highlights, Input, Player}};
 
-/// A human player at the terminal. Shows the board, lists the legal moves and reads a choice from stdin.
-pub struct LocalPlayer;
+/// Sheep that start the game: on the board plus in hand.
+const TOTAL_SHEEP: u32 = 20;
+
+/// A human player at the terminal, using the mouse: click a piece to select it, then click one
+/// of its highlighted destinations. While sheep are in hand, click an empty point to place one.
+#[derive(Default)]
+pub struct LocalPlayer
+{
+	/// The piece whose moves are highlighted.
+	selected: Option<Pos>,
+	/// The legal moves of `selected`, kept for `highlights`.
+	selected_moves: Vec<Move>,
+	/// Why the last click didn't do anything, if it didn't.
+	message: String,
+	/// The position to play, for the player panel; set by `update`.
+	status: Option<(GameBoard, Turn)>,
+}
+
+/// The source and destination of a move. Placements have no source.
+fn ends(mv: Move) -> (Option<Pos>, Pos)
+{
+	match mv
+	{
+		Move::PlaceSheep { pos } => (None, pos),
+		Move::MoveSheep { from, to } | Move::MoveTiger { from, to } => (Some(from), to),
+	}
+}
+
+fn is_mine(board: &GameBoard, pos: Pos, turn: Turn) -> bool
+{
+	match turn
+	{
+		Turn::Tiger => matches!(board.get(pos), PieceType::Tiger),
+		Turn::Sheep => matches!(board.get(pos), PieceType::Sheep),
+	}
+}
+
+impl LocalPlayer
+{
+	fn click(&mut self, pos: Pos, board: GameBoard, turn: Turn) -> Option<Move>
+	{
+		self.message.clear();
+		let moves = board.get_moves(turn);
+
+		if turn == Turn::Sheep && board.sheep_left() > 0
+		{
+			let mv = Move::PlaceSheep { pos };
+			if moves.contains(&mv)
+			{
+				return Some(mv);
+			}
+			if let Err(err) = board.check_move(mv)
+			{
+				self.message = err.to_string();
+			}
+			return None;
+		}
+
+		if let Some(mv) = self.selected_moves.iter().copied().find(|&m| ends(m).1 == pos)
+		{
+			return Some(mv);
+		}
+		self.reset();
+		if is_mine(&board, pos, turn)
+		{
+			let from_here: Vec<Move> = moves.into_iter().filter(|&m| ends(m).0 == Some(pos)).collect();
+			if from_here.is_empty()
+			{
+				self.message = "That piece can't move".to_string();
+			}
+			else
+			{
+				self.selected = Some(pos);
+				self.selected_moves = from_here;
+			}
+		}
+		None
+	}
+}
 
 impl Player for LocalPlayer
 {
-	fn pick_move(&mut self, board: GameBoard, turn: Turn) -> Move
-	{
-		let mut moves = board.get_moves(turn);
-		moves.sort();
-		print!("{}", render_board(&board));
-		println!();
-		println!("{:?} to move. Sheep in hand: {}, on board: {}", turn, board.sheep_left(), board.sheep_count());
-		for (i, mv) in moves.iter().enumerate()
-		{
-			println!("{:>3}) {}", i + 1, describe_move(*mv));
-		}
-		println!("Enter a move number, a point \"x y\" to place, or \"x y x y\" to move from/to. \"q\" quits.");
+	fn name(&self) -> String { "You".to_string() }
 
-		let stdin = io::stdin();
-		let mut lines = stdin.lock().lines();
-		loop
+	fn update(&mut self, board: GameBoard, turn: Turn)
+	{
+		self.status = Some((board, turn));
+	}
+
+	fn handle_input(&mut self, input: Input, board: GameBoard, turn: Turn) -> Option<Move>
+	{
+		match input
 		{
-			print!("> ");
-			io::stdout().flush().unwrap();
-			let line = match lines.next()
+			Input::Click(pos) => self.click(pos, board, turn),
+			Input::Key(_) => None,
+		}
+	}
+
+	fn highlights(&self) -> Highlights
+	{
+		Highlights
+		{
+			selected: self.selected,
+			targets: self.selected_moves.iter().map(|&m| ends(m).1).collect(),
+		}
+	}
+
+	fn reset(&mut self)
+	{
+		self.selected = None;
+		self.selected_moves.clear();
+	}
+
+	fn render(&self, area: Rect, buf: &mut Buffer)
+	{
+		let mut text = Text::from(self.name());
+		if let Some((board, turn)) = self.status
+		{
+			let dead = TOTAL_SHEEP - board.sheep_count() - board.sheep_left();
+			text.push_line(format!("Sheep in hand: {}, on board: {}, killed: {dead}",
+				board.sheep_left(), board.sheep_count()));
+			let instruction = if turn == Turn::Sheep && board.sheep_left() > 0
 			{
-				Some(Ok(line)) => line,
-				_ => std::process::exit(0),
+				"Click an empty point to place a sheep".to_string()
+			}
+			else if self.selected.is_some()
+			{
+				"Click a highlighted point to move there, or another piece to select it".to_string()
+			}
+			else
+			{
+				format!("Click a {} to move", if turn == Turn::Tiger { "tiger" } else { "sheep" })
 			};
-			if line.trim() == "q"
-			{
-				std::process::exit(0);
-			}
-			match parse_choice(&line, &board, turn, &moves)
-			{
-				Ok(mv) => return mv,
-				Err(err) => println!("{err}"),
-			}
+			text.push_line(instruction);
 		}
-	}
-}
-
-/// Turn a line of input into one of `moves`, or explain why it isn't one.
-fn parse_choice(input: &str, board: &GameBoard, turn: Turn, moves: &[Move]) -> Result<Move, String>
-{
-	let nums: Vec<u8> = input
-		.split(|c: char| c.is_whitespace() || c == ',')
-		.filter(|s| !s.is_empty())
-		.map(|s| s.parse().map_err(|_| format!("\"{s}\" isn't a number")))
-		.collect::<Result<_, _>>()?;
-
-	let mv = match nums[..]
-	{
-		[n] =>
+		if !self.message.is_empty()
 		{
-			return moves.get((n as usize).wrapping_sub(1)).copied()
-				.ok_or_else(|| format!("Pick a move from 1 to {}", moves.len()));
+			text.push_line(Line::styled(self.message.clone(), Style::new().fg(Color::Red)));
 		}
-		[x, y] => Move::PlaceSheep { pos: (x, y) },
-		[fx, fy, tx, ty] => match turn
-		{
-			Turn::Sheep => Move::MoveSheep { from: (fx, fy), to: (tx, ty) },
-			Turn::Tiger => Move::MoveTiger { from: (fx, fy), to: (tx, ty) },
-		},
-		_ => return Err("Enter 1, 2 or 4 numbers".to_string()),
-	};
-
-	if points(mv).iter().any(|&(x, y)| x > 4 || y > 4)
-	{
-		return Err("Points go from 0 to 4".to_string());
+		Paragraph::new(text).wrap(Wrap { trim: false }).render(area, buf);
 	}
-	if moves.contains(&mv)
-	{
-		return Ok(mv);
-	}
-	match board.check_move(mv)
-	{
-		Err(err) => Err(err.to_string()),
-		// Legal by the rules but not this side's move, e.g. placing as the tiger.
-		Ok(()) => Err(format!("{} isn't a move for {:?}", describe_move(mv), turn)),
-	}
-}
-
-fn points(mv: Move) -> Vec<(u8, u8)>
-{
-	match mv
-	{
-		Move::PlaceSheep { pos } => vec![pos],
-		Move::MoveSheep { from, to } | Move::MoveTiger { from, to } => vec![from, to],
-	}
-}
-
-fn describe_move(mv: Move) -> String
-{
-	match mv
-	{
-		Move::PlaceSheep { pos: (x, y) } => format!("Place sheep at {x} {y}"),
-		Move::MoveSheep { from: (fx, fy), to: (tx, ty) } => format!("Sheep {fx} {fy} -> {tx} {ty}"),
-		Move::MoveTiger { from: (fx, fy), to: (tx, ty) } =>
-		{
-			let jump = if fx.abs_diff(tx) == 2 || fy.abs_diff(ty) == 2 { " (jump)" } else { "" };
-			format!("Tiger {fx} {fy} -> {tx} {ty}{jump}")
-		}
-	}
-}
-
-/// The board with its lines, x across the top and y down the side:
-///
-/// ```text
-///     0   1   2   3   4
-/// 0   T - . - . - . - T
-///     | \ | / | \ | / |
-/// 1   . - . - . - . - .
-/// ```
-fn render_board(board: &GameBoard) -> String
-{
-	let mut out = String::from("    0   1   2   3   4\n");
-	for y in 0..5u8
-	{
-		out += &format!("{y}   ");
-		for x in 0..5u8
-		{
-			out += match board.get((x, y))
-			{
-				PieceType::Tiger => "T",
-				PieceType::Sheep => "S",
-				PieceType::Empty => ".",
-			};
-			if x < 4
-			{
-				out += " - ";
-			}
-		}
-		out += "\n";
-		if y < 4
-		{
-			out += "    ";
-			for x in 0..5u8
-			{
-				out += "|";
-				if x < 4
-				{
-					out += if (x + y) % 2 == 0 { " \\ " } else { " / " };
-				}
-			}
-			out += "\n";
-		}
-	}
-	out
 }
 
 #[cfg(test)]
@@ -158,52 +150,86 @@ mod tests
 {
 	use super::*;
 
-	#[test]
-	fn render_default_board()
+	/// The default board with all 20 sheep placed, on every point but (2, 1).
+	fn moving_board() -> GameBoard
 	{
-		let expected = "    0   1   2   3   4\n\
-			0   T - . - . - . - T\n    | \\ | / | \\ | / |\n\
-			1   . - . - . - . - .\n    | / | \\ | / | \\ |\n\
-			2   . - . - . - . - .\n    | \\ | / | \\ | / |\n\
-			3   . - . - . - . - .\n    | / | \\ | / | \\ |\n\
-			4   T - . - . - . - T\n";
-		assert_eq!(render_board(&GameBoard::default()), expected);
+		let mut board = GameBoard::default();
+		for y in 0..5
+		{
+			for x in 0..5
+			{
+				if (x, y) != (2, 1) && matches!(board.get((x, y)), PieceType::Empty)
+				{
+					board.make_move(Move::PlaceSheep { pos: (x, y) }).unwrap();
+				}
+			}
+		}
+		assert_eq!(board.sheep_left(), 0);
+		board
 	}
 
 	#[test]
-	fn parse_choice_by_number()
+	fn click_places_a_sheep()
 	{
+		let mut player = LocalPlayer::default();
 		let board = GameBoard::default();
-		let moves = board.get_moves(Turn::Tiger);
-		assert_eq!(parse_choice("1", &board, Turn::Tiger, &moves), Ok(moves[0]));
-		assert_eq!(parse_choice(" 3 ", &board, Turn::Tiger, &moves), Ok(moves[2]));
-		assert!(parse_choice("0", &board, Turn::Tiger, &moves).is_err());
-		assert!(parse_choice("99", &board, Turn::Tiger, &moves).is_err());
+		assert_eq!(player.handle_input(Input::Click((2, 2)), board, Turn::Sheep), Some(Move::PlaceSheep { pos: (2, 2) }));
 	}
 
 	#[test]
-	fn parse_choice_by_points()
+	fn click_on_occupied_point_explains_why()
 	{
-		let board = GameBoard::default();
-		let sheep = board.get_moves(Turn::Sheep);
-		let tiger = board.get_moves(Turn::Tiger);
-		assert_eq!(parse_choice("2 2", &board, Turn::Sheep, &sheep), Ok(Move::PlaceSheep { pos: (2, 2) }));
-		assert_eq!(parse_choice("2,2", &board, Turn::Sheep, &sheep), Ok(Move::PlaceSheep { pos: (2, 2) }));
-		assert_eq!(parse_choice("0 0 1 1", &board, Turn::Tiger, &tiger), Ok(Move::MoveTiger { from: (0, 0), to: (1, 1) }));
+		let mut player = LocalPlayer::default();
+		assert_eq!(player.handle_input(Input::Click((0, 0)), GameBoard::default(), Turn::Sheep), None);
+		assert_eq!(player.message, "Can't place a sheep on an occupied point!");
 	}
 
 	#[test]
-	fn parse_choice_explains_bad_input()
+	fn select_highlight_then_move_tiger()
 	{
+		let mut player = LocalPlayer::default();
 		let board = GameBoard::default();
-		let sheep = board.get_moves(Turn::Sheep);
-		let tiger = board.get_moves(Turn::Tiger);
-		assert_eq!(parse_choice("0 0", &board, Turn::Sheep, &sheep), Err("Can't place a sheep on an occupied point!".to_string()));
-		assert_eq!(parse_choice("0 0 2 0", &board, Turn::Tiger, &tiger), Err("Tigers can only jump over a sheep!".to_string()));
-		assert_eq!(parse_choice("2 2", &board, Turn::Tiger, &tiger), Err("Place sheep at 2 2 isn't a move for Tiger".to_string()));
-		assert_eq!(parse_choice("5 0", &board, Turn::Sheep, &sheep), Err("Points go from 0 to 4".to_string()));
-		assert!(parse_choice("a", &board, Turn::Sheep, &sheep).is_err());
-		assert!(parse_choice("1 2 3", &board, Turn::Sheep, &sheep).is_err());
-		assert!(parse_choice("", &board, Turn::Sheep, &sheep).is_err());
+		assert_eq!(player.handle_input(Input::Click((0, 0)), board, Turn::Tiger), None);
+		let mut targets = player.highlights().targets;
+		targets.sort();
+		assert_eq!(player.highlights().selected, Some((0, 0)));
+		assert_eq!(targets, vec![(0, 1), (1, 0), (1, 1)]);
+		assert_eq!(player.handle_input(Input::Click((1, 1)), board, Turn::Tiger),
+			Some(Move::MoveTiger { from: (0, 0), to: (1, 1) }));
+	}
+
+	#[test]
+	fn clicking_another_piece_reselects()
+	{
+		let mut player = LocalPlayer::default();
+		let board = GameBoard::default();
+		player.handle_input(Input::Click((0, 0)), board, Turn::Tiger);
+		player.handle_input(Input::Click((4, 4)), board, Turn::Tiger);
+		assert_eq!(player.highlights().selected, Some((4, 4)));
+		// (1, 1) isn't reachable from (4, 4), so it just deselects
+		assert_eq!(player.handle_input(Input::Click((1, 1)), board, Turn::Tiger), None);
+		assert_eq!(player.highlights(), Highlights::default());
+	}
+
+	#[test]
+	fn select_and_move_sheep()
+	{
+		let mut player = LocalPlayer::default();
+		let board = moving_board();
+		assert_eq!(player.handle_input(Input::Click((2, 2)), board, Turn::Sheep), None);
+		assert_eq!(player.highlights().targets, vec![(2, 1)]);
+		assert_eq!(player.handle_input(Input::Click((2, 1)), board, Turn::Sheep),
+			Some(Move::MoveSheep { from: (2, 2), to: (2, 1) }));
+	}
+
+	#[test]
+	fn stuck_piece_is_not_selected()
+	{
+		let mut player = LocalPlayer::default();
+		let board = moving_board();
+		// (0, 4) is a tiger boxed in by sheep with nothing empty behind them
+		assert_eq!(player.handle_input(Input::Click((0, 4)), board, Turn::Tiger), None);
+		assert_eq!(player.highlights().selected, None);
+		assert_eq!(player.message, "That piece can't move");
 	}
 }

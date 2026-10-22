@@ -1,6 +1,6 @@
 use std::{fmt::Display};
 
-type Pos = (u8, u8);
+pub type Pos = (u8, u8);
 
 pub enum PieceType
 {
@@ -20,7 +20,7 @@ impl Display for PieceType
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GameBoard
 {
 	sheep_mask: u32,
@@ -51,6 +51,42 @@ pub enum Move
 	PlaceSheep{pos: Pos},
 	MoveSheep{from: Pos, to: Pos},
 	MoveTiger{from: Pos, to: Pos}
+}
+
+/// A point in chess-style notation: files `a`–`e` for x 0–4, ranks `5`–`1` for y 0–4
+/// (so y = 0, drawn at the top, is rank 5).
+pub fn pos_name((x, y): Pos) -> String
+{
+	format!("{}{}", (b'a' + x) as char, 5 - y)
+}
+
+/// True for a tiger move of two points, which always jumps (and kills) a sheep.
+pub fn is_jump(mv: Move) -> bool
+{
+	match mv
+	{
+		Move::MoveTiger { from: (fx, fy), to: (tx, ty) } => fx.abs_diff(tx) == 2 || fy.abs_diff(ty) == 2,
+		_ => false,
+	}
+}
+
+/// Chess-like notation: `s<pos>` places a sheep, `s<from><to>` moves one,
+/// `t<from><to>` moves a tiger and `t<from>x<to>` is a tiger jump.
+impl Display for Move
+{
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result
+	{
+		match *self
+		{
+			Move::PlaceSheep { pos } => write!(f, "s{}", pos_name(pos)),
+			Move::MoveSheep { from, to } => write!(f, "s{}{}", pos_name(from), pos_name(to)),
+			Move::MoveTiger { from, to } =>
+			{
+				let x = if is_jump(*self) { "x" } else { "" };
+				write!(f, "t{}{x}{}", pos_name(from), pos_name(to))
+			}
+		}
+	}
 }
 
 /// Why `check_move` rejected a move.
@@ -457,6 +493,26 @@ mod tests
 	fn is_tiger(board: &GameBoard, pos: Pos) -> bool { matches!(board.get(pos), PieceType::Tiger) }
 	fn is_sheep(board: &GameBoard, pos: Pos) -> bool { matches!(board.get(pos), PieceType::Sheep) }
 	fn is_empty(board: &GameBoard, pos: Pos) -> bool { matches!(board.get(pos), PieceType::Empty) }
+
+	// --- notation ---
+
+	#[test]
+	fn pos_name_uses_files_and_ranks()
+	{
+		assert_eq!(pos_name((0, 4)), "a1");
+		assert_eq!(pos_name((0, 0)), "a5");
+		assert_eq!(pos_name((4, 4)), "e1");
+		assert_eq!(pos_name((2, 2)), "c3");
+	}
+
+	#[test]
+	fn move_display_is_chess_like()
+	{
+		assert_eq!(Move::PlaceSheep { pos: (2, 2) }.to_string(), "sc3");
+		assert_eq!(Move::MoveSheep { from: (2, 2), to: (2, 3) }.to_string(), "sc3c2");
+		assert_eq!(Move::MoveTiger { from: (0, 0), to: (1, 1) }.to_string(), "ta5b4");
+		assert_eq!(Move::MoveTiger { from: (0, 0), to: (2, 2) }.to_string(), "ta5xc3");
+	}
 
 	// --- bit_idx / get / set ---
 

@@ -6,3 +6,6 @@ edition = "2021"
 [[bin]]
 name = "tigers-and-sheep-rs"
 path = "src/main.rs"
+
+[dependencies]
+ratatui = "0.30.2"
