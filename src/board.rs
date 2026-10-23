@@ -220,6 +220,9 @@ fn pos_of(idx: usize) -> Pos
 
 impl GameBoard
 {
+	/// No pieces on the board and none in hand.
+	pub const EMPTY: GameBoard = GameBoard { sheep_mask: 0, tiger_mask: 0 };
+
 	fn bit_idx((x, y): Pos) -> usize
 	{
 		if x > 4 || y > 4
@@ -260,30 +263,78 @@ impl GameBoard
     }
 	
 	pub fn sheep_left(&self) -> u32 { self.sheep_mask >> SHEEP_COUNT_SHIFT }
+	/// The whole board, sheep in hand included, as one number: different boards give different keys.
+	pub fn key(&self) -> u64 { (self.sheep_mask as u64) << 32 | self.tiger_mask as u64 }
 	pub fn sheep_count(&self) -> u32 { (self.sheep_mask & BOARD_MASK).count_ones() }
 
-	/// All legal moves for `turn`. Sheep place while any are in hand, then move.
-	pub fn get_moves(&self, turn: Turn) -> Vec<Move>
+	/// Empty board points.
+	fn empty(&self) -> u32
+	{
+		!(self.tiger_mask | self.sheep_mask) & BOARD_MASK
+	}
+
+	/// For each direction, the points a sheep can step to in that direction.
+	fn sheep_steps(&self) -> [u32; 8]
+	{
+		let sheep = self.sheep_mask & BOARD_MASK;
+		let empty = self.empty();
+		let mut steps = [0; 8];
+		for d in 0..8
+		{
+			steps[d] = shift(sheep & STEP_SOURCES[d], DELTAS[d]) & empty;
+		}
+		steps
+	}
+
+	/// For each direction, the points a tiger can step to and the points it can jump to.
+	fn tiger_targets(&self) -> ([u32; 8], [u32; 8])
 	{
 		let tigers = self.tiger_mask;
 		let sheep = self.sheep_mask & BOARD_MASK;
-		let empty = !(tigers | sheep) & BOARD_MASK;
+		let empty = self.empty();
+		let mut steps = [0; 8];
+		let mut jumps = [0; 8];
+		for d in 0..8
+		{
+			steps[d] = shift(tigers & STEP_SOURCES[d], DELTAS[d]) & empty;
+			let over = shift(tigers & JUMP_SOURCES[d], DELTAS[d]) & sheep;
+			jumps[d] = shift(over, DELTAS[d]) & empty;
+		}
+		(steps, jumps)
+	}
 
+	/// True if `turn` has a legal move: the same as `!get_moves(turn).is_empty()`, without building the list.
+	pub fn has_moves(&self, turn: Turn) -> bool
+	{
+		match turn
+		{
+			Turn::Sheep if self.sheep_left() > 0 => self.empty() != 0,
+			Turn::Sheep => self.sheep_steps().iter().any(|&m| m != 0),
+			Turn::Tiger =>
+			{
+				let (steps, jumps) = self.tiger_targets();
+				steps.iter().chain(jumps.iter()).fold(0, |acc, m| acc | m) != 0
+			}
+		}
+	}
+
+	/// All legal moves for `turn`. Sheep place while any are in hand, then move.
+	/// Tiger jumps come before steps, since the search tries kills first.
+	pub fn get_moves(&self, turn: Turn) -> Vec<Move>
+	{
+		crate::player::count!(move_gens);
 		match turn
 		{
 			Turn::Sheep if self.sheep_left() > 0 =>
 			{
+				let empty = self.empty();
 				let mut moves = Vec::with_capacity(empty.count_ones() as usize);
 				moves.extend(indices(empty).map(|idx| Move::PlaceSheep { pos: pos_of(idx) }));
 				moves
 			}
 			Turn::Sheep =>
 			{
-				let mut steps = [0; 8];
-				for d in 0..8
-				{
-					steps[d] = shift(sheep & STEP_SOURCES[d], DELTAS[d]) & empty;
-				}
+				let steps = self.sheep_steps();
 				let mut moves = Vec::with_capacity(steps.iter().map(|m| m.count_ones() as usize).sum());
 				for d in 0..8
 				{
@@ -297,26 +348,22 @@ impl GameBoard
 			}
 			Turn::Tiger =>
 			{
-				let mut steps = [0; 8];
-				let mut jumps = [0; 8];
-				for d in 0..8
-				{
-					steps[d] = shift(tigers & STEP_SOURCES[d], DELTAS[d]) & empty;
-					let over = shift(tigers & JUMP_SOURCES[d], DELTAS[d]) & sheep;
-					jumps[d] = shift(over, DELTAS[d]) & empty;
-				}
+				let (steps, jumps) = self.tiger_targets();
 				let count = steps.iter().chain(jumps.iter()).map(|m| m.count_ones() as usize).sum();
 				let mut moves = Vec::with_capacity(count);
+				for d in 0..8
+				{
+					for to in indices(jumps[d])
+					{
+						let from = (to as isize - 2 * DELTAS[d]) as usize;
+						moves.push(Move::MoveTiger { from: pos_of(from), to: pos_of(to) });
+					}
+				}
 				for d in 0..8
 				{
 					for to in indices(steps[d])
 					{
 						let from = (to as isize - DELTAS[d]) as usize;
-						moves.push(Move::MoveTiger { from: pos_of(from), to: pos_of(to) });
-					}
-					for to in indices(jumps[d])
-					{
-						let from = (to as isize - 2 * DELTAS[d]) as usize;
 						moves.push(Move::MoveTiger { from: pos_of(from), to: pos_of(to) });
 					}
 				}
@@ -411,14 +458,7 @@ impl GameBoard
 	/// The side that just moved has won.
 	pub fn check_win(&self, turn: Turn) -> bool
 	{
-		if self.sheep_count() + self.sheep_left() <= 15
-		{
-			true
-		}
-		else
-		{
-			self.get_moves(turn).len() == 0
-		}
+		self.sheep_count() + self.sheep_left() <= 15 || !self.has_moves(turn)
 	}
 
 	pub fn after_move_unchecked(&self, mv: Move) -> Self
@@ -884,6 +924,10 @@ mod tests
 			}
 			assert_moves_match(&board, Turn::Tiger);
 			assert_moves_match(&board, Turn::Sheep);
+			for turn in [Turn::Tiger, Turn::Sheep]
+			{
+				assert_eq!(board.has_moves(turn), !board.get_moves(turn).is_empty(), "{turn:?} on {board:?}");
+			}
 		}
 	}
 

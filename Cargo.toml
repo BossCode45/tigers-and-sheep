@@ -9,3 +9,12 @@ path = "src/main.rs"
 
 [dependencies]
 ratatui = "0.30.2"
+
+[features]
+# Count nodes, cache hits and cutoffs during the search, for `bench`.
+search-stats = []
+
+# A release build that keeps debug info, for profilers: `cargo build --profile profiling`
+[profile.profiling]
+inherits = "release"
+debug = true

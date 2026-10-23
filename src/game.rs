@@ -1,4 +1,4 @@
-use std::io;
+use std::{io, time::Duration};
 
 use ratatui::{
 	crossterm::{event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind}, execute},
@@ -111,7 +111,9 @@ impl GameHandler
 			let player = &mut *players[idx(turn)];
 			let action = match (!over).then(|| player.pick_move(board, turn)).flatten()
 			{
-				Some(m) => Action::Play(m),
+				// Input that came in during the search goes first, so a quit or a revert isn't
+				// lost when both players are computers and nothing ever waits for input
+				Some(m) => self.pending_action(player, board, turn)?.unwrap_or(Action::Play(m)),
 				None => self.handle_event(event::read()?, player, board, turn, over),
 			};
 
@@ -127,6 +129,20 @@ impl GameHandler
 				}
 			}
 		}
+	}
+
+	/// Handle the events already waiting, without blocking, until one of them does something.
+	fn pending_action(&self, player: &mut dyn Player, board: GameBoard, turn: Turn) -> io::Result<Option<Action>>
+	{
+		while event::poll(Duration::ZERO)?
+		{
+			let action = self.handle_event(event::read()?, player, board, turn, false);
+			if !matches!(action, Action::None)
+			{
+				return Ok(Some(action));
+			}
+		}
+		Ok(None)
 	}
 
 	fn handle_event(&self, ev: Event, player: &mut dyn Player, board: GameBoard, turn: Turn, over: bool) -> Action

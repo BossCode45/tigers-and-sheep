@@ -6,5 +6,37 @@
 ** Move generation caching?
 ** DONE Iterative deepening
 - Use results of previous searches for move ordering
-** Profile to see what needs optimization the most
+** DONE Profile to see what needs optimization the most
+- =cargo run --profile profiling -- bench 9= (add =--features search-stats= for counters)
+- Profile: =perf record -e cycles:u -m 16 --call-graph dwarf target/profiling/tigers-and-sheep-rs bench 9=
+  (=-m 16= keeps the ring buffer under =perf_event_mlock_kb=, otherwise mmap fails)
+- First profile, depth 9: 2056 ms, 2.05 M nodes, ~1.0 M nodes/s
+  | Where                                     | Share                    |
+  |-------------------------------------------+--------------------------|
+  | Kernel: clock_gettime syscalls            | 43% of wall time (sys)   |
+  | SipHash for the cache HashMap             | ~29% of user cycles      |
+  | get_moves (2.0 calls/node, Vec each time) | ~22% of user cycles      |
+  | minimax_uncached + inlined evaluate       | ~29% of user cycles      |
+  - The kernel time was not the HashMap's page faults, as first thought: the kernel had fallen back
+    from the TSC to the HPET clock source, so =Instant::now()= at every interior node was a real
+    syscall (=strace -c=: 99% of syscall time in clock_gettime). After a reboot it was back on TSC.
+    Check =/sys/devices/system/clocksource/clocksource0/current_clocksource= before comparing timings.
+- Search: cache hit rate 29% (1.8 probes/node); 74% of cutoffs on the first move (63% in placement)
+** DONE Speed-ups from the profile
+All at depth 9 on the TSC clock source; scores and moves the same as the baseline at every step.
+| Step                                       | Time ms | Nodes  | Nodes/s | 1st-move cutoffs |
+|--------------------------------------------+---------+--------+---------+------------------|
+| Baseline                                   |    1205 | 2.05 M | 1.7 M   | 72%              |
+| =has_moves= in =check_win=                 |    1045 | 2.05 M | 2.0 M   | 72%              |
+| =TranspositionTable= (2^20 slots, 24 MB)   |     650 | 2.07 M | 3.2 M   | 72%              |
+| Jumps first, killer moves                  |     572 | 1.67 M | 2.9 M   | 97%              |
+- Table: always-replace needed 2.82 M nodes at 2^20 slots (2.31 M even at 2^22), because the 1.5 M
+  leaf entries pushed out deeper ones. Two-slot buckets, one kept for the deepest entry, fixed it.
+- Ordering: a =sort_by_key= cost ~26% of cycles and made it slower overall than no ordering;
+  =get_moves= now lists jumps first and the search rotates killers and the hint to the front instead.
+- Killers on their own cut nodes 10% but made the opening search bigger (0.93 M -> 1.04 M nodes)
+*** Next candidates
+- Check the deadline every N nodes instead of at every node, so a slow clock source can't cost half the search
+- =evaluate=: tiger moves and trapped tigers from bitmasks rather than =get_moves= + 25 =get()= calls
+- Table lookups are now the top item (~28% of cycles), mostly cache misses into the 24 MB table
 * Draws

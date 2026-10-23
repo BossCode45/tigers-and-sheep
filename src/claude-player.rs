@@ -1,6 +1,6 @@
-use std::{collections::HashMap, time::Duration};
+use std::time::Duration;
 
-use crate::{board::{is_jump, GameBoard, Move, PieceType, Turn}, player::{CacheEntry, MinimaxPlayer, SearchReport}};
+use crate::{board::{is_jump, GameBoard, Move, PieceType, Turn}, player::{Killers, MinimaxPlayer, SearchReport, TranspositionTable}};
 
 /// Sheep that start the game: on the board plus in hand.
 const TOTAL_SHEEP: u32 = 20;
@@ -9,7 +9,10 @@ const TOTAL_SHEEP: u32 = 20;
 pub struct ClaudePlayer
 {
 	pub time_limit: Duration,
-	cache: HashMap<(GameBoard, Turn, usize), CacheEntry>,
+	/// The most plies to search, counting the move itself; normally `time_limit` stops the search first.
+	pub max_depth: usize,
+	cache: TranspositionTable,
+	killers: Killers,
 	last_search: Option<SearchReport>,
 }
 
@@ -17,7 +20,7 @@ impl Default for ClaudePlayer
 {
 	fn default() -> Self
 	{
-		Self { time_limit: Duration::from_secs(1), cache: HashMap::new(), last_search: None }
+		Self::new(Duration::from_secs(1))
 	}
 }
 
@@ -25,7 +28,7 @@ impl ClaudePlayer
 {
 	pub fn new(time_limit: Duration) -> Self
 	{
-		Self { time_limit, cache: HashMap::new(), last_search: None }
+		Self { time_limit, max_depth: 64, cache: TranspositionTable::new(20), killers: Killers::default(), last_search: None }
 	}
 }
 
@@ -70,9 +73,13 @@ impl MinimaxPlayer for ClaudePlayer
 
 	fn time_limit(&self) -> Duration { self.time_limit }
 
+	fn depth(&self) -> usize { self.max_depth }
+
 	fn cache(&mut self) -> Option<&mut dyn crate::player::ScoreCache> {
 		Some(&mut self.cache)
 	}
+
+	fn killers(&mut self) -> Option<&mut Killers> { Some(&mut self.killers) }
 }
 
 #[cfg(test)]

@@ -30,6 +30,8 @@
               pre-commit
               rustPackages.clippy
               rust-analyzer
+              samply
+              perf
             ];
             RUST_SRC_PATH = rustPlatform.rustLibSrc;
           };
