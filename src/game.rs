@@ -4,6 +4,7 @@ use ratatui::{
 	crossterm::{event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind}, execute},
 	layout::{Constraint, Layout, Margin, Rect},
 	style::{Color, Modifier, Style},
+	symbols::merge::MergeStrategy,
 	text::{Line, Span},
 	widgets::{Block, Paragraph},
 	DefaultTerminal, Frame,
@@ -32,6 +33,12 @@ enum Action
 	Quit,
 	Play(Move),
 	Revert(usize),
+}
+
+/// A bordered pane whose borders join up with its neighbours' where they overlap.
+fn panel() -> Block<'static>
+{
+	Block::bordered().merge_borders(MergeStrategy::Exact)
 }
 
 fn side_name(turn: Turn) -> &'static str
@@ -112,11 +119,7 @@ impl GameHandler
 			{
 				Action::None => (),
 				Action::Quit => return Ok(self.winner()),
-				Action::Play(m) =>
-				{
-					player.reset();
-					self.play(m);
-				}
+				Action::Play(m) => self.play(m),
 				Action::Revert(i) =>
 				{
 					self.revert(i);
@@ -163,17 +166,61 @@ impl GameHandler
 	fn draw(&mut self, frame: &mut Frame, players: &[&mut dyn Player; 2])
 	{
 		let (_, board_h) = BoardView::size(1);
-		let [top, bottom] = Layout::vertical([Constraint::Min(board_h + 4), Constraint::Length(6)]).areas(frame.area());
+		// Neighbouring panes overlap by a cell, so they share one border that `panel` merges into ┬ ┴ ┼
+		let [top, bottom] = Layout::vertical([Constraint::Min(board_h + 4), Constraint::Length(6)]).spacing(-1).areas(frame.area());
 		// History rows are like "123. ta5xc3  [↶]", so a fixed narrow pane fits them; the board gets the rest
-		let [board_pane, history_pane] = Layout::horizontal([Constraint::Min(0), Constraint::Length(20)]).areas(top);
+		let [board_pane, history_pane] = Layout::horizontal([Constraint::Min(0), Constraint::Length(20)]).spacing(-1).areas(top);
+		let [current_pane, last_pane] = Layout::horizontal([Constraint::Percentage(70), Constraint::Fill(1)]).spacing(-1).areas(bottom);
 
 		let winner = self.winner();
 		let turn = self.turn();
 		let player = &*players[match turn { Turn::Sheep => 0, Turn::Tiger => 1 }];
 
+		// The bottom row is drawn first, so the top row's bottom titles (keybinds, revert hint)
+		// land on the shared border line over it. Its own titles go on its bottom border.
+		// Player output, or the result once the game is over
+		match winner
+		{
+			Some(w) =>
+			{
+				let block = panel().title_bottom(" Game over ");
+				let text = vec![
+					Line::styled(format!("{} win!", side_name(w)), Style::new().add_modifier(Modifier::BOLD)),
+					Line::from("Click a move to revert to it, or press q to quit."),
+				];
+				frame.render_widget(Paragraph::new(text).block(block), current_pane);
+			}
+			None =>
+			{
+				let block = panel().title_bottom(format!(" {}: {} ", side_name(turn), player.name()));
+				let inner = block.inner(current_pane);
+				frame.render_widget(block, current_pane);
+				frame.render_widget(player, inner);
+			}
+		}
+
+		// The previous player's comments on the move it just made
+		let last = turn.next_turn();
+		let previous = &*players[match last { Turn::Sheep => 0, Turn::Tiger => 1 }];
+		let title = if self.history.is_empty() { " Last turn ".to_string() }
+			else
+			{
+				// Drop the name and shorten the label if the pane is too narrow for it
+				let full = format!(" Last turn: {} ({}) ", side_name(last), previous.name());
+				let fits = full.chars().count() as u16 + 2 <= last_pane.width;
+				if fits { full } else { format!(" Last: {} ", side_name(last)) }
+			};
+		let block = panel().title_bottom(title);
+		let inner = block.inner(last_pane);
+		frame.render_widget(block, last_pane);
+		if !self.history.is_empty()
+		{
+			previous.render_last_turn(inner, frame.buffer_mut());
+		}
+
 		// Board
 		// Keep in step with `handle_event`
-		let block = Block::bordered().title(" Board ").title_bottom(" click: select / move · q, Esc: quit ");
+		let block = panel().title(" Board ").title_bottom(" click: select / move · q, Esc: quit ");
 		let inner = block.inner(board_pane);
 		frame.render_widget(block, board_pane);
 		// Leave a cell of margin, then centre the biggest board that fits
@@ -190,7 +237,7 @@ impl GameHandler
 		frame.render_widget(&view, padded);
 
 		// Move history, scrolled to keep the newest move in view
-		let block = Block::bordered().title(" Moves ").title_bottom(" ↶ reverts ");
+		let block = panel().title(" Moves ").title_bottom(" ↶ reverts ");
 		let inner = block.inner(history_pane);
 		frame.render_widget(block, history_pane);
 		self.history_rows.clear();
@@ -207,28 +254,8 @@ impl GameHandler
 			frame.render_widget(line, rect);
 			self.history_rows.push((rect, i));
 		}
-
-		// Player output, or the result once the game is over
-		match winner
-		{
-			Some(w) =>
-			{
-				let block = Block::bordered().title(" Game over ");
-				let text = vec![
-					Line::styled(format!("{} win!", side_name(w)), Style::new().add_modifier(Modifier::BOLD)),
-					Line::from("Click a move to revert to it, or press q to quit."),
-				];
-				frame.render_widget(Paragraph::new(text).block(block), bottom);
-			}
-			None =>
-			{
-				let block = Block::bordered().title(format!(" {}: {} ", side_name(turn), player.name()));
-				let inner = block.inner(bottom);
-				frame.render_widget(block, bottom);
-				frame.render_widget(player, inner);
-			}
-		}
 	}
+
 }
 
 #[cfg(test)]
@@ -275,7 +302,7 @@ mod tests
 	}
 
 	use ratatui::{backend::TestBackend, crossterm::event::{MouseEvent, KeyEvent}, Terminal};
-	use crate::local_player::LocalPlayer;
+	use crate::{claude_player::ClaudePlayer, local_player::LocalPlayer};
 
 	fn draw(game: &mut GameHandler, players: &[&mut dyn Player; 2]) -> Terminal<TestBackend>
 	{
@@ -313,6 +340,8 @@ mod tests
 		let screen = format!("{:?}", terminal.backend().buffer());
 		assert!(screen.contains("1. sc3     [↶]"), "{screen}");
 		assert!(screen.contains("Tigers: You"), "{screen}");
+		assert!(screen.contains("Last: Sheep"), "{screen}");
+		assert!(screen.contains("Played sc3"), "{screen}");
 
 		let (rect, i) = game.history_rows[0];
 		let action = game.handle_event(click(rect.x + 2, rect.y), &mut tiger, game.board(), game.turn(), false);
@@ -340,6 +369,35 @@ mod tests
 		let at = (area.left()..area.right()).flat_map(|x| (area.top()..area.bottom()).map(move |y| (x, y)))
 			.find(|&(x, y)| buf[(x, y)].symbol() == "S").expect("sheep drawn");
 		assert_eq!(pos_at(area, at.0, at.1), Some((2, 2)));
+	}
+
+	#[test]
+	fn last_turn_panel_shows_the_computer_search()
+	{
+		let mut game = GameHandler::default();
+		let mut sheep = LocalPlayer::default();
+		let mut tiger = ClaudePlayer::new(std::time::Duration::from_millis(50));
+		game.play(Move::PlaceSheep { pos: (2, 2) });
+		let m = tiger.pick_move(game.board(), game.turn()).unwrap();
+		game.play(m);
+
+		let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+		terminal.draw(|frame| game.draw(frame, &[&mut sheep, &mut tiger])).unwrap();
+		let screen = format!("{:?}", terminal.backend().buffer());
+		assert!(screen.contains("Last turn: Tigers (Claude)"), "{screen}");
+		assert!(screen.contains(&format!("Played {m}")), "{screen}");
+		assert!(screen.contains("Searched to depth"), "{screen}");
+		assert!(screen.contains("Score: "), "{screen}");
+
+		// Borders are shared and joined where panes meet, and every pane reaches the right edge
+		let buf = terminal.backend().buffer();
+		let row = |y: u16| (0..100).map(|x| buf[(x, y)].symbol()).collect::<String>();
+		assert!(row(0).starts_with("┌ Board ─") && row(0).ends_with("┐"), "{}", row(0));
+		assert!(row(0).contains("┬ Moves "), "{}", row(0));
+		assert_eq!(row(18).chars().next(), Some('├'), "{}", row(18));
+		assert!(row(18).contains('┴') && row(18).contains('┬') && row(18).ends_with("┤"), "{}", row(18));
+		assert!(row(18).contains(" click: select / move · q, Esc: quit "), "{}", row(18));
+		assert!(row(23).starts_with("└ Sheep: You ─") && row(23).contains('┴') && row(23).ends_with("┘"), "{}", row(23));
 	}
 
 	#[test]

@@ -14,8 +14,7 @@ mod claude_player;
 
 fn main() -> std::io::Result<()> {
 	let mut game = GameHandler::default();
-	// I play sheep, claude plays tiger
-	let winner = game.play_game(&mut LocalPlayer::default(), &mut ClaudePlayer::new(Duration::from_secs(2)))?;
+	let winner = game.play_game(&mut ClaudePlayer::new(Duration::from_secs(2)), &mut LocalPlayer::default())?;
 	if let Some(winner) = winner
 	{
 		println!("{winner:?} wins!");

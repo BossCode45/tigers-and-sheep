@@ -1,6 +1,6 @@
 use std::{collections::HashMap, time::{Duration, Instant}};
 
-use ratatui::{buffer::Buffer, crossterm::event::KeyEvent, layout::Rect, widgets::{Paragraph, Widget}};
+use ratatui::{buffer::Buffer, crossterm::event::KeyEvent, layout::Rect, widgets::{Paragraph, Widget, Wrap}};
 
 use crate::board::{GameBoard, Move, Pos, Turn};
 
@@ -40,14 +40,18 @@ pub trait Player
 	/// Points for the coordinator to highlight on the board.
 	fn highlights(&self) -> Highlights { Highlights::default() }
 
-	/// Drop any half-made selection, e.g. after a move or a revert.
+	/// The game was reverted: drop any half-made selection, and anything said about the last move.
 	fn reset(&mut self) {}
 
-	/// Draw into the player-output panel. By default this shows the player's name.
+	/// Draw into the player-output panel while it's this player's turn. By default this shows the player's name.
 	fn render(&self, area: Rect, buf: &mut Buffer)
 	{
 		Paragraph::new(self.name()).render(area, buf);
 	}
+
+	/// Draw some end-of-turn comments on the move this player just made, shown beside the other
+	/// player's panel during their turn. By default this shows nothing.
+	fn render_last_turn(&self, _area: Rect, _buf: &mut Buffer) {}
 }
 
 /// Every player is a ratatui widget through `Player::render`.
@@ -61,6 +65,17 @@ impl Widget for &dyn Player
 }
 
 pub type ScoreType = f32;
+
+/// What a `MinimaxPlayer`'s last `pick_move` found.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SearchReport
+{
+	pub mv: Move,
+	/// The deepest search that finished, in plies counting the move itself.
+	pub depth: usize,
+	/// The score of `mv` at `depth`; positive favours tigers, and ±`WIN` is a forced win.
+	pub score: ScoreType,
+}
 
 /// What a search has proved about a board's true score: it lies in `lower..=upper`.
 /// An alpha-beta cutoff only proves one side, so the other is left infinite.
@@ -230,6 +245,12 @@ pub trait MinimaxPlayer
 	fn time_limit(&self) -> Duration { Duration::from_secs(1) }
 
 	fn name(&self) -> String { "Computer".to_string() }
+
+	/// Override with `last_search` to keep each search's report for the last-turn panel.
+	/// By default it is dropped.
+	fn set_last_search(&mut self, _report: Option<SearchReport>) {}
+
+	fn last_search(&self) -> Option<SearchReport> { None }
 }
 
 impl<P: MinimaxPlayer> Player for P
@@ -248,6 +269,7 @@ impl<P: MinimaxPlayer> Player for P
 			c.clear();
 		}
 		let mut best = None;
+		let mut report = None;
 		for depth in 1..=self.depth().max(1)
 		{
 			// Depth 1 ignores the deadline, so there is always a move to play
@@ -259,6 +281,7 @@ impl<P: MinimaxPlayer> Player for P
 				break;
 			};
 			best = m;
+			report = m.map(|mv| SearchReport { mv, depth, score });
 			// A forced win or loss won't change with more depth,
 			// and past half the budget the next depth probably won't finish
 			if score.abs() >= Self::WIN || start.elapsed() > time_limit / 2
@@ -266,12 +289,37 @@ impl<P: MinimaxPlayer> Player for P
 				break;
 			}
 		}
+		self.set_last_search(report);
 		Some(best.expect("pick_move called with no legal moves"))
     }
+
+	fn reset(&mut self)
+	{
+		self.set_last_search(None);
+	}
 
 	fn render(&self, area: Rect, buf: &mut Buffer)
 	{
 		Paragraph::new(format!("{}\n\nThinking…", MinimaxPlayer::name(self))).render(area, buf);
+	}
+
+	fn render_last_turn(&self, area: Rect, buf: &mut Buffer)
+	{
+		let Some(r) = self.last_search() else { return };
+		let score = if r.score >= Self::WIN
+		{
+			"forced win for tigers".to_string()
+		}
+		else if r.score <= -Self::WIN
+		{
+			"forced win for sheep".to_string()
+		}
+		else
+		{
+			format!("{:+.1} (+ favours tigers)", r.score)
+		};
+		Paragraph::new(format!("Played {}\nSearched to depth {}\nScore: {score}", r.mv, r.depth))
+			.wrap(Wrap { trim: true }).render(area, buf);
 	}
     
 }

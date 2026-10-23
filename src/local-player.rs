@@ -18,6 +18,8 @@ pub struct LocalPlayer
 	message: String,
 	/// The position to play, for the player panel; set by `update`.
 	status: Option<(GameBoard, Turn)>,
+	/// The move this player last made, for the last-turn panel.
+	played: Option<Move>,
 }
 
 /// The source and destination of a move. Placements have no source.
@@ -41,6 +43,15 @@ fn is_mine(board: &GameBoard, pos: Pos, turn: Turn) -> bool
 
 impl LocalPlayer
 {
+	/// Clear the selection and note `mv` as played.
+	fn play(&mut self, mv: Move) -> Option<Move>
+	{
+		self.selected = None;
+		self.selected_moves.clear();
+		self.played = Some(mv);
+		Some(mv)
+	}
+
 	fn click(&mut self, pos: Pos, board: GameBoard, turn: Turn) -> Option<Move>
 	{
 		self.message.clear();
@@ -51,7 +62,7 @@ impl LocalPlayer
 			let mv = Move::PlaceSheep { pos };
 			if moves.contains(&mv)
 			{
-				return Some(mv);
+				return self.play(mv);
 			}
 			if let Err(err) = board.check_move(mv)
 			{
@@ -62,9 +73,10 @@ impl LocalPlayer
 
 		if let Some(mv) = self.selected_moves.iter().copied().find(|&m| ends(m).1 == pos)
 		{
-			return Some(mv);
+			return self.play(mv);
 		}
-		self.reset();
+		self.selected = None;
+		self.selected_moves.clear();
 		if is_mine(&board, pos, turn)
 		{
 			let from_here: Vec<Move> = moves.into_iter().filter(|&m| ends(m).0 == Some(pos)).collect();
@@ -113,15 +125,26 @@ impl Player for LocalPlayer
 	{
 		self.selected = None;
 		self.selected_moves.clear();
+		self.played = None;
+		self.message.clear();
+	}
+
+	fn render_last_turn(&self, area: Rect, buf: &mut Buffer)
+	{
+		if let Some(mv) = self.played
+		{
+			Paragraph::new(format!("Played {mv}")).render(area, buf);
+		}
 	}
 
 	fn render(&self, area: Rect, buf: &mut Buffer)
 	{
-		let mut text = Text::from(self.name());
+		// The coordinator's panel title already shows the name
+		let mut text = Text::default();
 		if let Some((board, turn)) = self.status
 		{
 			let dead = TOTAL_SHEEP - board.sheep_count() - board.sheep_left();
-			text.push_line(format!("Sheep in hand: {}, on board: {}, killed: {dead}",
+			text.push_line(format!("Sheep in hand: {} · on board: {} · killed: {dead}",
 				board.sheep_left(), board.sheep_count()));
 			let instruction = if turn == Turn::Sheep && board.sheep_left() > 0
 			{
@@ -129,7 +152,7 @@ impl Player for LocalPlayer
 			}
 			else if self.selected.is_some()
 			{
-				"Click a highlighted point to move there, or another piece to select it".to_string()
+				"Click a highlighted point, or another piece".to_string()
 			}
 			else
 			{
@@ -174,6 +197,20 @@ mod tests
 		let mut player = LocalPlayer::default();
 		let board = GameBoard::default();
 		assert_eq!(player.handle_input(Input::Click((2, 2)), board, Turn::Sheep), Some(Move::PlaceSheep { pos: (2, 2) }));
+	}
+
+	#[test]
+	fn played_move_is_remembered_until_reset()
+	{
+		let mut player = LocalPlayer::default();
+		let mv = player.handle_input(Input::Click((2, 2)), GameBoard::default(), Turn::Sheep).unwrap();
+		assert_eq!(player.played, Some(mv));
+		let mut buf = Buffer::empty(Rect::new(0, 0, 20, 2));
+		player.render_last_turn(buf.area, &mut buf);
+		assert_eq!((0..20).map(|x| buf[(x, 0)].symbol()).collect::<String>().trim_end(), "Played sc3");
+
+		player.reset();
+		assert_eq!(player.played, None);
 	}
 
 	#[test]

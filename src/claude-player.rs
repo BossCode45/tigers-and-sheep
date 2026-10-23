@@ -1,6 +1,6 @@
 use std::{collections::HashMap, time::Duration};
 
-use crate::{board::{is_jump, GameBoard, Move, PieceType, Turn}, player::{CacheEntry, MinimaxPlayer}};
+use crate::{board::{is_jump, GameBoard, Move, PieceType, Turn}, player::{CacheEntry, MinimaxPlayer, SearchReport}};
 
 /// Sheep that start the game: on the board plus in hand.
 const TOTAL_SHEEP: u32 = 20;
@@ -9,14 +9,15 @@ const TOTAL_SHEEP: u32 = 20;
 pub struct ClaudePlayer
 {
 	pub time_limit: Duration,
-	cache: HashMap<(GameBoard, Turn, usize), CacheEntry>
+	cache: HashMap<(GameBoard, Turn, usize), CacheEntry>,
+	last_search: Option<SearchReport>,
 }
 
 impl Default for ClaudePlayer
 {
 	fn default() -> Self
 	{
-		Self { time_limit: Duration::from_secs(1), cache: HashMap::new() }
+		Self { time_limit: Duration::from_secs(1), cache: HashMap::new(), last_search: None }
 	}
 }
 
@@ -24,7 +25,7 @@ impl ClaudePlayer
 {
 	pub fn new(time_limit: Duration) -> Self
 	{
-		Self { time_limit, cache: HashMap::new() }
+		Self { time_limit, cache: HashMap::new(), last_search: None }
 	}
 }
 
@@ -63,9 +64,35 @@ impl MinimaxPlayer for ClaudePlayer
 
 	fn name(&self) -> String { "Claude".to_string() }
 
+	fn set_last_search(&mut self, report: Option<SearchReport>) { self.last_search = report; }
+
+	fn last_search(&self) -> Option<SearchReport> { self.last_search }
+
 	fn time_limit(&self) -> Duration { self.time_limit }
 
 	fn cache(&mut self) -> Option<&mut dyn crate::player::ScoreCache> {
 		Some(&mut self.cache)
+	}
+}
+
+#[cfg(test)]
+mod tests
+{
+	use super::*;
+	use crate::player::Player;
+
+	#[test]
+	fn pick_move_reports_its_search()
+	{
+		let mut player = ClaudePlayer::new(Duration::from_millis(50));
+		let m = player.pick_move(GameBoard::default(), Turn::Tiger).unwrap();
+		let report = player.last_search.expect("a report");
+		assert_eq!(report.mv, m);
+		assert!(report.depth >= 1);
+		assert_eq!(report.score, player.minimax(GameBoard::default(), Turn::Tiger, report.depth,
+			f32::NEG_INFINITY, f32::INFINITY, None).unwrap());
+
+		player.reset();
+		assert_eq!(player.last_search, None);
 	}
 }
