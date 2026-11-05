@@ -39,7 +39,7 @@ impl MinimaxPlayer for ClaudePlayer
 	/// - jumps the tigers could make right now (sheep left hanging);
 	/// - tigers boxed in with no move at all, since trapping every tiger wins for the sheep;
 	/// - tiger mobility in general, since the sheep win by squeezing it to zero.
-	fn evaluate(&mut self, board: &GameBoard) -> f32
+	fn evaluate(&mut self, board: &GameBoard, _turn: Turn) -> f32
 	{
 		let dead = TOTAL_SHEEP - board.sheep_count() - board.sheep_left();
 

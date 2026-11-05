@@ -10,3 +10,5 @@
 
 # Temporary removing github workflows
 .github
+# Trained networks (cargo run --release -- train)
+/weights

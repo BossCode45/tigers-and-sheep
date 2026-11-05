@@ -2,7 +2,7 @@ use std::{collections::HashMap, time::{Duration, Instant}};
 
 use ratatui::{buffer::Buffer, crossterm::event::KeyEvent, layout::Rect, widgets::{Paragraph, Widget, Wrap}};
 
-use crate::board::{is_jump, GameBoard, Move, Pos, Turn};
+use crate::board::{inverse_symmetry, is_jump, transform_move, GameBoard, Move, Pos, Turn};
 
 /// Input the game coordinator passes on to the player whose turn it is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -89,7 +89,7 @@ pub struct CacheEntry
 }
 
 /// Score cache for a `MinimaxPlayer`. No defaults, so an implementor must supply all of it.
-/// Entries are keyed by the side to move and the remaining search depth as well as the board,
+/// `minimax` looks boards up by `GameBoard::canonical`, so symmetric boards share an entry. Entries are keyed by the side to move and the remaining search depth as well as the board,
 /// since the same board can be reached with either side to move, or at different depths.
 pub trait ScoreCache
 {
@@ -318,7 +318,11 @@ pub trait MinimaxPlayer
 	/// Returns None if `deadline` passed before the search finished.
 	fn minimax(&mut self, board: GameBoard, turn: Turn, depth: usize,
 			   mut alpha: ScoreType, mut beta: ScoreType, deadline: Option<Instant>) -> Option<ScoreType> {
-		let known = self.cache().and_then(|c| { count!(cache_probes); c.lookup(&board, turn, depth) });
+		// Symmetric boards are equally good, so they share an entry, under the canonical board.
+		// Entries' best moves are stored as played on that board, and turned back for this one.
+		let (canon, sym) = if self.cache().is_some() { board.canonical() } else { (board, 0) };
+		let back = |m: Move| transform_move(m, inverse_symmetry(sym));
+		let known = self.cache().and_then(|c| { count!(cache_probes); c.lookup(&canon, turn, depth) });
 		let mut hint = None;
 		if let Some(k) = known
 		{
@@ -335,16 +339,17 @@ pub trait MinimaxPlayer
 			}
 			alpha = alpha.max(k.lower);
 			beta = beta.min(k.upper);
-			hint = k.best;
+			hint = k.best.map(back);
 		}
 		// Otherwise try the best move from the previous, one-ply-shallower iteration first
 		if hint.is_none() && depth > 0
 		{
-			hint = self.cache().and_then(|c| { count!(cache_probes); c.lookup(&board, turn, depth - 1) }).and_then(|e| e.best);
+			hint = self.cache().and_then(|c| { count!(cache_probes); c.lookup(&canon, turn, depth - 1) }).and_then(|e| e.best).map(back);
 		}
 		let (score, best) = self.minimax_uncached(board, turn, depth, alpha, beta, hint, deadline)?;
 		if let Some(c) = self.cache()
 		{
+			let best = best.map(|m| transform_move(m, sym));
 			// On a fail-low every move was only bounded, so none is known to be best
 			let mut entry = if score <= alpha
 			{
@@ -364,7 +369,7 @@ pub trait MinimaxPlayer
 				entry.upper = entry.upper.min(k.upper);
 				entry.best = entry.best.or(k.best);
 			}
-			c.insert(&board, turn, depth, entry);
+			c.insert(&canon, turn, depth, entry);
 		}
 		Some(score)
 	}
@@ -387,7 +392,7 @@ pub trait MinimaxPlayer
 		if depth == 0
 		{
 			count!(leaves);
-			return Some((self.evaluate(&board), None));
+			return Some((self.evaluate(&board, turn), None));
 		}
 		if deadline.is_some_and(|d| Instant::now() >= d)
 		{
@@ -471,8 +476,8 @@ pub trait MinimaxPlayer
 		None
 	}
 	
-	/// More positive for tiger winning, less positive for sheep winning
-	fn evaluate(&mut self, board: &GameBoard) -> ScoreType;
+	/// More positive for tiger winning, less positive for sheep winning, with `turn` to move next
+	fn evaluate(&mut self, board: &GameBoard, turn: Turn) -> ScoreType;
 
 	/// The most plies `pick_move` searches, counting its own move. Normally the time limit stops it first.
 	fn depth(&self) -> usize { MAX_DEPTH }
@@ -616,7 +621,7 @@ mod tests
 
 	impl MinimaxPlayer for TestPlayer
 	{
-		fn evaluate(&mut self, board: &GameBoard) -> ScoreType
+		fn evaluate(&mut self, board: &GameBoard, _turn: Turn) -> ScoreType
 		{
 			let dead = 20 - board.sheep_count() - board.sheep_left();
 			100.0 * dead as f32 + board.get_moves(Turn::Tiger).len() as f32
@@ -651,7 +656,7 @@ mod tests
 		}
 		if depth == 0
 		{
-			return player.evaluate(&board);
+			return player.evaluate(&board, turn);
 		}
 		let scores = board.get_moves(turn).into_iter()
 			.map(|m| reference(player, board.after_move_unchecked(m), turn.next_turn(), depth - 1));

@@ -87,7 +87,7 @@ impl GameHandler
 
 	/// Play in the terminal with `p1` as the sheep and `p2` as the tigers, until someone wins and
 	/// the user quits. Returns the winner, or None if the user quit before the game was won.
-	pub fn play_game<T1: Player, T2: Player>(&mut self, p1: &mut T1, p2: &mut T2) -> io::Result<Option<Turn>>
+	pub fn play_game(&mut self, p1: &mut dyn Player, p2: &mut dyn Player) -> io::Result<Option<Turn>>
 	{
 		let mut terminal = ratatui::init();
 		let result = execute!(io::stdout(), EnableMouseCapture)

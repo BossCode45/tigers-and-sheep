@@ -218,6 +218,94 @@ fn pos_of(idx: usize) -> Pos
 	((idx % 5) as u8, (idx / 5) as u8)
 }
 
+/// The board's 8 symmetries (rotations and reflections) as a point map: bit 2 of `sym` swaps x and
+/// y, then bit 0 mirrors x and bit 1 mirrors y. They all keep the board lines, since x + y keeps
+/// its parity, so a transformed position is just as legal and just as good for either side.
+pub const SYMMETRIES: usize = 8;
+
+pub const fn transform_pos((x, y): Pos, sym: usize) -> Pos
+{
+	let (x, y) = if sym & 4 != 0 { (y, x) } else { (x, y) };
+	let x = if sym & 1 != 0 { 4 - x } else { x };
+	let y = if sym & 2 != 0 { 4 - y } else { y };
+	(x, y)
+}
+
+/// For each symmetry, where each bit index goes.
+const SYMMETRY_MAPS: [[u8; 25]; SYMMETRIES] = {
+	let mut maps = [[0; 25]; SYMMETRIES];
+	let mut sym = 0;
+	while sym < SYMMETRIES
+	{
+		let mut idx = 0;
+		while idx < 25
+		{
+			let (x, y) = transform_pos(((idx % 5) as u8, (idx / 5) as u8), sym);
+			maps[sym][idx] = x + y * 5;
+			idx += 1;
+		}
+		sym += 1;
+	}
+	maps
+};
+
+/// For each symmetry and row, where each of the 32 possible sets of points in that row go, so a
+/// whole mask transforms in 5 lookups. The search does this for every cache probe.
+const ROW_MAPS: [[[u32; 32]; 5]; SYMMETRIES] = {
+	let mut maps = [[[0; 32]; 5]; SYMMETRIES];
+	let mut sym = 0;
+	while sym < SYMMETRIES
+	{
+		let mut row = 0;
+		while row < 5
+		{
+			let mut bits = 0;
+			while bits < 32
+			{
+				let mut x = 0;
+				while x < 5
+				{
+					if bits & 1 << x != 0
+					{
+						maps[sym][row][bits] |= 1 << SYMMETRY_MAPS[sym][x + row * 5];
+					}
+					x += 1;
+				}
+				bits += 1;
+			}
+			row += 1;
+		}
+		sym += 1;
+	}
+	maps
+};
+
+#[inline(always)]
+fn transform_mask(mask: u32, sym: usize) -> u32
+{
+	let rows = &ROW_MAPS[sym];
+	rows[0][(mask & 31) as usize] | rows[1][(mask >> 5 & 31) as usize] | rows[2][(mask >> 10 & 31) as usize]
+		| rows[3][(mask >> 15 & 31) as usize] | rows[4][(mask >> 20 & 31) as usize]
+}
+
+/// The symmetry that undoes `sym`. The mirrors undo themselves, but with the swap of x and y
+/// first, undoing them means swapping which axis is mirrored.
+pub const fn inverse_symmetry(sym: usize) -> usize
+{
+	if sym & 4 == 0 { sym } else { 4 | (sym & 1) << 1 | (sym >> 1 & 1) }
+}
+
+/// `mv` as played on the board transformed by `sym`.
+pub fn transform_move(mv: Move, sym: usize) -> Move
+{
+	match mv
+	{
+		Move::PlaceSheep { pos } => Move::PlaceSheep { pos: transform_pos(pos, sym) },
+		Move::MoveSheep { from, to } => Move::MoveSheep { from: transform_pos(from, sym), to: transform_pos(to, sym) },
+		Move::MoveTiger { from, to } => Move::MoveTiger { from: transform_pos(from, sym), to: transform_pos(to, sym) },
+	}
+}
+
 impl GameBoard
 {
 	/// No pieces on the board and none in hand.
@@ -266,6 +354,37 @@ impl GameBoard
 	/// The whole board, sheep in hand included, as one number: different boards give different keys.
 	pub fn key(&self) -> u64 { (self.sheep_mask as u64) << 32 | self.tiger_mask as u64 }
 	pub fn sheep_count(&self) -> u32 { (self.sheep_mask & BOARD_MASK).count_ones() }
+	/// The points holding a tiger, as bits `x + y*5`.
+	pub fn tiger_points(&self) -> u32 { self.tiger_mask }
+	/// The points holding a sheep, as bits `x + y*5`.
+	pub fn sheep_points(&self) -> u32 { self.sheep_mask & BOARD_MASK }
+
+	/// The board under symmetry `sym` (see `transform_pos`), with the same sheep in hand.
+	pub fn transformed(&self, sym: usize) -> GameBoard
+	{
+		GameBoard
+		{
+			tiger_mask: transform_mask(self.tiger_mask, sym),
+			sheep_mask: transform_mask(self.sheep_points(), sym) | (self.sheep_mask & !BOARD_MASK),
+		}
+	}
+
+	/// One board standing for all 8 symmetric ones (the one whose `key` is smallest), and the
+	/// symmetry that takes `self` to it. Symmetric boards are equally good, so the search caches
+	/// them under one entry.
+	pub fn canonical(&self) -> (GameBoard, usize)
+	{
+		let mut best = (*self, 0);
+		for sym in 1..SYMMETRIES
+		{
+			let t = self.transformed(sym);
+			if t.key() < best.0.key()
+			{
+				best = (t, sym);
+			}
+		}
+		best
+	}
 
 	/// Empty board points.
 	fn empty(&self) -> u32
@@ -1245,5 +1364,97 @@ mod tests
 		assert!(board.get_moves(Turn::Sheep).is_empty());
 		assert!(board.check_win(Turn::Sheep));
 		assert!(!board.check_win(Turn::Tiger));
+	}
+
+	// --- symmetries ---
+
+	#[test]
+	fn symmetries_are_distinct_bijections()
+	{
+		for sym in 0..SYMMETRIES
+		{
+			let mut seen = 0u32;
+			for idx in 0..25
+			{
+				seen |= 1 << SYMMETRY_MAPS[sym][idx];
+			}
+			assert_eq!(seen, BOARD_MASK, "symmetry {sym} is not a bijection");
+			for other in 0..sym
+			{
+				assert_ne!(SYMMETRY_MAPS[sym], SYMMETRY_MAPS[other], "symmetries {sym} and {other}");
+			}
+		}
+		assert_eq!(transform_pos((1, 0), 0), (1, 0));
+		assert_eq!(GameBoard::default().transformed(5), GameBoard::default());
+	}
+
+	#[test]
+	fn inverse_symmetry_undoes_it()
+	{
+		for sym in 0..SYMMETRIES
+		{
+			for idx in 0..25
+			{
+				let pos = pos_of(idx);
+				assert_eq!(transform_pos(transform_pos(pos, sym), inverse_symmetry(sym)), pos, "symmetry {sym}");
+			}
+		}
+	}
+
+	#[test]
+	fn canonical_is_shared_by_symmetric_boards()
+	{
+		let mut seed: u64 = 0x94D049BB133111EB;
+		let mut next = || { seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17; seed };
+		let mut board = GameBoard::default();
+		let mut turn = Turn::Sheep;
+		for _ in 0..60
+		{
+			if board.check_win(turn) { break; }
+			let (canon, sym) = board.canonical();
+			assert_eq!(board.transformed(sym), canon);
+			for s in 0..SYMMETRIES
+			{
+				let t = board.transformed(s);
+				assert_eq!(t.canonical().0, canon, "symmetry {s} of {board:?}");
+				// The fast transform agrees with moving each point
+				let slow = |mask: u32| indices(mask).fold(0, |m, idx| m | 1 << SYMMETRY_MAPS[s][idx]);
+				assert_eq!((t.tiger_points(), t.sheep_points()), (slow(board.tiger_points()), slow(board.sheep_points())));
+			}
+			let moves = board.get_moves(turn);
+			board.make_move_unchecked(moves[(next() % moves.len() as u64) as usize]);
+			turn = turn.next_turn();
+		}
+	}
+
+	#[test]
+	fn transformed_boards_have_transformed_moves()
+	{
+		let mut seed: u64 = 0xD1B54A32D192ED03;
+		let mut next = || { seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17; seed };
+		let mut board = GameBoard::default();
+		let mut turn = Turn::Sheep;
+		for _ in 0..80
+		{
+			if board.check_win(turn) { break; }
+			for sym in 0..SYMMETRIES
+			{
+				let t = board.transformed(sym);
+				assert_eq!(t.sheep_left(), board.sheep_left());
+				assert_eq!(t.sheep_count(), board.sheep_count());
+				for side in [Turn::Tiger, Turn::Sheep]
+				{
+					let mut expected: Vec<Move> = board.get_moves(side).into_iter().map(|m| transform_move(m, sym)).collect();
+					expected.sort();
+					let mut moves = t.get_moves(side);
+					moves.sort();
+					assert_eq!(moves, expected, "symmetry {sym}, {side:?} on {board:?}");
+					assert_eq!(t.check_win(side), board.check_win(side));
+				}
+			}
+			let moves = board.get_moves(turn);
+			board.make_move_unchecked(moves[(next() % moves.len() as u64) as usize]);
+			turn = turn.next_turn();
+		}
 	}
 }

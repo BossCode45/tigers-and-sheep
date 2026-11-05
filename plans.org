@@ -35,8 +35,35 @@ All at depth 9 on the TSC clock source; scores and moves the same as the baselin
 - Ordering: a =sort_by_key= cost ~26% of cycles and made it slower overall than no ordering;
   =get_moves= now lists jumps first and the search rotates killers and the hint to the front instead.
 - Killers on their own cut nodes 10% but made the opening search bigger (0.93 M -> 1.04 M nodes)
+** DONE Symmetric cache
+=minimax= looks positions up by =GameBoard::canonical= (smallest =key= of the 8 rotations and
+reflections), storing best moves as played on the canonical board. Depth 9 on the HPET clock
+source, so the times are only comparable with each other; moves and scores unchanged.
+| Step                    | Time ms | Nodes  | Nodes/s (stats build) |
+|-------------------------+---------+--------+-----------------------|
+| Before                  |    1170 | 1.67 M | 1.44 M                |
+| Canonical cache keys    |     570 | 0.71 M | 1.24 M                |
+- The opening (fully symmetric) shrank most: 1.04 M -> 0.23 M nodes. Each probe now does 7 board
+  transforms of 10 row lookups each, which costs ~14% per node.
 *** Next candidates
 - Check the deadline every N nodes instead of at every node, so a slow clock source can't cost half the search
 - =evaluate=: tiger moves and trapped tigers from bitmasks rather than =get_moves= + 25 =get()= calls
 - Table lookups are now the top item (~28% of cycles), mostly cache misses into the 24 MB table
 * Draws
+* Neural player training
+** DONE Tiger bias in self-play
+Before the fix, tigers won ~97% of self-play games and the net only reached ~15-20% against
+=ClaudePlayer= at depth 3. 200 games each, tigers/sheep/draws:
+| Players   | Random opening plies | eps  | Result     |
+|-----------+----------------------+------+------------|
+| Claude d3 |                   10 | 0    | 78/22/100  |
+| Claude d3 |                   10 | 0.05 | 171/15/14  |
+| Neural d3 |                    4 | 0    | 197/0/3    |
+- Random sheep moves usually hang a sheep, so eps exploration alone tilts games to the tigers, and
+  TD targets carried those wins back to the positions before the blunders.
+- Fix: a position where a random move was played is labelled with its own search score, cutting
+  the TD chain. Neural d3, 4 random plies, eps 0 became 126/4/70, and against =ClaudePlayer= (100
+  games, depth 3) it went 12% at gen 5, 50% at gen 50, 50-62% at gens 60-100.
+*** Next candidates
+- Pick exploratory moves among near-best ones (softmax over root scores) rather than uniformly
+- Sheep are still the weaker side: report the match score for each side separately
