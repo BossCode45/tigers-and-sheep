@@ -9,6 +9,8 @@ pub struct Config
 	pub generations: usize,
 	pub games_per_generation: usize,
 	pub out_dir: PathBuf,
+	/// Start from this network instead of the newest one in `out_dir` (or a random one).
+	pub from: Option<PathBuf>,
 	/// Search depth for every move in self-play and matches. The depth cap, not a time limit,
 	/// ends each search, so runs are repeatable.
 	pub depth: usize,
@@ -22,6 +24,8 @@ pub struct Config
 	pub lambda: f32,
 	/// Train on the samples of this many of the latest generations.
 	pub buffer_generations: usize,
+	/// Train on as many positions from sheep-win games as from tiger-win games (see `balanced`).
+	pub balance_outcomes: bool,
 	pub epochs: usize,
 	pub batch_size: usize,
 	pub learning_rate: f32,
@@ -38,12 +42,14 @@ impl Default for Config
 			generations: 50,
 			games_per_generation: 500,
 			out_dir: PathBuf::from("weights"),
+			from: None,
 			depth: 3,
 			ply_cap: 200,
 			random_plies: 10,
 			epsilon: 0.05,
 			lambda: 0.7,
 			buffer_generations: 5,
+			balance_outcomes: true,
 			epochs: 2,
 			batch_size: 256,
 			learning_rate: 1e-3,
@@ -62,6 +68,8 @@ pub enum Outcome
 
 impl Outcome
 {
+	const ALL: [Outcome; 3] = [Outcome::Tiger, Outcome::Sheep, Outcome::Draw];
+
 	/// +1 for a tiger win, -1 for a sheep win, matching the sign of the scores.
 	fn value(self) -> f32
 	{
@@ -212,6 +220,39 @@ fn match_score<P: MinimaxPlayer + Player>(net: &Network, opponent: impl Fn() -> 
 	points / cfg.match_games.max(1) as f32
 }
 
+/// One epoch's training positions, taken from the positions of tiger-win, sheep-win and drawn
+/// games. Self-play ends mostly in tiger wins, so training on everything would teach the net
+/// mostly what tiger wins look like. Instead this takes the same number from each kind of win:
+/// their mean, so the epoch is the same size. The bigger pool gives a random subset, and the
+/// smaller one gives every position plus random repeats (shown in different orientations by
+/// the caller). Draws are kept as they are. If either kind of win has no positions, everything is used.
+fn balanced(pools: &[Vec<Sample>; 3], rng: &mut Rng) -> Vec<Sample>
+{
+	let [tigers, sheep, draws] = pools;
+	if tigers.is_empty() || sheep.is_empty()
+	{
+		return pools.concat();
+	}
+	let n = (tigers.len() + sheep.len()) / 2;
+	let mut out = draws.clone();
+	for pool in [tigers, sheep]
+	{
+		// Every position once while there are enough, picked by a partial shuffle of the indices
+		let mut idx: Vec<usize> = (0..pool.len()).collect();
+		for i in 0..n.min(pool.len())
+		{
+			let j = i + rng.below(pool.len() - i);
+			idx.swap(i, j);
+			out.push(pool[idx[i]]);
+		}
+		for _ in pool.len()..n
+		{
+			out.push(pool[rng.below(pool.len())]);
+		}
+	}
+	out
+}
+
 /// The newest `gen-NNN.bin` in `dir`, as (generation, path).
 fn latest_generation(dir: &Path) -> Option<(usize, PathBuf)>
 {
@@ -226,24 +267,29 @@ fn latest_generation(dir: &Path) -> Option<(usize, PathBuf)>
 }
 
 /// Trains a network by self-play, saving each generation to `out_dir/gen-NNN.bin` and `out_dir/latest.bin`.
-/// Carries on from the newest generation already in `out_dir`, if there is one.
+/// Starts from `cfg.from` if given, otherwise carries on from the newest generation already in
+/// `out_dir`, if there is one. Generations are numbered on from the newest in `out_dir` either way.
 pub fn run(cfg: &Config) -> std::io::Result<()>
 {
 	fs::create_dir_all(&cfg.out_dir)?;
-	let (first, mut net) = match latest_generation(&cfg.out_dir)
+	let latest = latest_generation(&cfg.out_dir);
+	let first = latest.as_ref().map_or(1, |(n, _)| n + 1);
+	let mut net = match cfg.from.as_ref().or(latest.as_ref().map(|(_, path)| path))
 	{
-		Some((n, path)) =>
+		Some(path) =>
 		{
 			println!("Carrying on from {}", path.display());
-			(n + 1, Network::load(&path)?)
+			Network::load(path)?
 		}
-		None => (1, Network::random(0x5EED)),
+		None => Network::random(0x5EED),
 	};
 	let mut adam = Adam::new(cfg.learning_rate);
-	let mut buffer: VecDeque<Vec<Sample>> = VecDeque::new();
+	// For each generation, its positions from tiger-win, sheep-win and drawn games
+	let mut buffer: VecDeque<[Vec<Sample>; 3]> = VecDeque::new();
 	let mut rng = Rng::new(first as u64);
-	println!("{:>4} {:>7} {:>6} {:>6} {:>6} {:>8} {:>8} {:>7} {:>7} {:>7}",
-		"gen", "samples", "tigers", "sheep", "draws", "loss", "after", "vs prev", "vs Claude", "time s");
+	println!("Self-play results, then the mean error on positions from tiger-win (T) and sheep-win (S) games, before and after training");
+	println!("{:>4} {:>7} {:>6} {:>6} {:>6} {:>8} {:>8} {:>8} {:>8} {:>7} {:>9} {:>7}",
+		"gen", "trained", "tigers", "sheep", "draws", "T before", "S before", "T after", "S after", "vs prev", "vs Claude", "time s");
 	for generation in first..first + cfg.generations
 	{
 		let start = Instant::now();
@@ -251,17 +297,21 @@ pub fn run(cfg: &Config) -> std::io::Result<()>
 		let games = parallel(cfg.games_per_generation, |i| self_play(&net, cfg, seed_base | i as u64));
 		let count = |o: Outcome| games.iter().filter(|(g, _)| *g == o).count();
 		let (tigers, sheep, draws) = (count(Outcome::Tiger), count(Outcome::Sheep), count(Outcome::Draw));
-		buffer.push_back(games.into_iter().flat_map(|(_, s)| s).collect());
+		buffer.push_back(Outcome::ALL.map(|o| games.iter().filter(|(g, _)| *g == o).flat_map(|(_, s)| s).copied().collect()));
 		while buffer.len() > cfg.buffer_generations
 		{
 			buffer.pop_front();
 		}
 
-		let mut samples: Vec<Sample> = buffer.iter().flatten().copied().collect();
-		let loss_before = net.loss(&samples);
+		let pools: [Vec<Sample>; 3] = [0, 1, 2].map(|k| buffer.iter().flat_map(|g| &g[k]).copied().collect());
+		let losses = |net: &Network| (net.loss(&pools[0]), net.loss(&pools[1]));
+		let before = losses(&net);
 		let previous = net.clone();
+		let mut trained = 0;
 		for _ in 0..cfg.epochs
 		{
+			let mut samples = if cfg.balance_outcomes { balanced(&pools, &mut rng) } else { pools.concat() };
+			trained = samples.len();
 			// Shuffle, and show each position in a random one of its 8 orientations
 			for i in (1..samples.len()).rev()
 			{
@@ -276,14 +326,14 @@ pub fn run(cfg: &Config) -> std::io::Result<()>
 				net.train_batch(batch, &mut adam);
 			}
 		}
-		let loss_after = net.loss(&samples);
+		let after = losses(&net);
 
 		let vs_prev = match_score(&net, || neural(&previous, cfg.depth), cfg, seed_base ^ 0xA);
 		let vs_claude = match_score(&net, || claude(cfg.depth), cfg, seed_base ^ 0xB);
 		net.save(&cfg.out_dir.join(format!("gen-{generation:03}.bin")))?;
 		net.save(&cfg.out_dir.join("latest.bin"))?;
-		println!("{generation:>4} {:>7} {tigers:>6} {sheep:>6} {draws:>6} {loss_before:>8.4} {loss_after:>8.4} {:>6.0}% {:>8.0}% {:>7.1}",
-			samples.len(), vs_prev * 100.0, vs_claude * 100.0, start.elapsed().as_secs_f64());
+		println!("{generation:>4} {trained:>7} {tigers:>6} {sheep:>6} {draws:>6} {:>8.4} {:>8.4} {:>8.4} {:>8.4} {:>6.0}% {:>8.0}% {:>7.1}",
+			before.0, before.1, after.0, after.1, vs_prev * 100.0, vs_claude * 100.0, start.elapsed().as_secs_f64());
 	}
 	Ok(())
 }
@@ -343,6 +393,25 @@ mod tests
 		{
 			assert_eq!(samples.len(), cfg.ply_cap);
 		}
+	}
+
+	#[test]
+	fn balanced_takes_as_many_of_each_win()
+	{
+		let sample = |target: f32| Sample { board: GameBoard::default(), turn: Turn::Sheep, target };
+		let pools = [vec![sample(1.0); 90], (0..10).map(|i| sample(-(i as f32) / 10.0)).collect(), vec![sample(0.5); 4]];
+		let mut rng = Rng::new(1);
+		let out = balanced(&pools, &mut rng);
+		assert_eq!(out.len(), 50 + 50 + 4);
+		assert_eq!(out.iter().filter(|s| s.target == 1.0).count(), 50);
+		assert_eq!(out.iter().filter(|s| s.target == 0.5).count(), 4);
+		// The smaller pool's positions are all there, before any repeats
+		let sheep: Vec<f32> = out.iter().map(|s| s.target).filter(|&t| t <= 0.0).collect();
+		assert_eq!(sheep.len(), 50);
+		assert!((0..10).all(|i| sheep[..10].contains(&(-(i as f32) / 10.0))));
+		// Without sheep wins there is nothing to balance
+		let lopsided = [vec![sample(1.0); 5], vec![], vec![sample(0.0); 2]];
+		assert_eq!(balanced(&lopsided, &mut rng).len(), 7);
 	}
 
 	#[test]

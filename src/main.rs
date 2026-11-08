@@ -18,7 +18,14 @@ mod neural_player;
 mod train;
 
 fn main() -> std::io::Result<()> {
-	let args: Vec<String> = std::env::args().collect();
+	let mut args: Vec<String> = std::env::args().collect();
+	// `--from <weights>` can go anywhere after `train`
+	let from = args.iter().position(|a| a == "--from").map(|i|
+	{
+		let path = args.get(i + 1).cloned().expect("usage: --from <weights file>");
+		args.drain(i..=i + 1);
+		path
+	});
 	let arg = |i: usize| args.get(i).map(String::as_str);
 	let number = |i: usize, default: usize| arg(i).map_or(default, |n| n.parse().expect("expected a number"));
 	match arg(1)
@@ -29,7 +36,8 @@ fn main() -> std::io::Result<()> {
 			bench::run(number(2, 6));
 			return Ok(());
 		}
-		// `train [generations] [games per generation] [out dir]` trains a network by self-play
+		// `train [generations] [games per generation] [out dir] [--from <weights>]` trains a network
+		// by self-play, starting from `--from`, or the newest generation in the out dir, or random weights
 		Some("train") =>
 		{
 			let defaults = train::Config::default();
@@ -38,6 +46,7 @@ fn main() -> std::io::Result<()> {
 				generations: number(2, defaults.generations),
 				games_per_generation: number(3, defaults.games_per_generation),
 				out_dir: arg(4).map_or(defaults.out_dir.clone(), Into::into),
+				from: from.map(Into::into),
 				..defaults
 			};
 			return train::run(&cfg);

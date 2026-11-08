@@ -67,3 +67,14 @@ Before the fix, tigers won ~97% of self-play games and the net only reached ~15-
 *** Next candidates
 - Pick exploratory moves among near-best ones (softmax over root scores) rather than uniformly
 - Sheep are still the weaker side: report the match score for each side separately
+** DONE Balance tiger-win and sheep-win positions
+The unbalanced net (gen 100) had 7x the error on positions from sheep-win games (0.045) as on
+tiger-win ones (0.0065), so it leaned towards tiger wins, though not a constant prediction (that
+would give errors near 2). =balance_outcomes= trains on equal numbers of each.
+| vs =ClaudePlayer= (depth 3, 100 games) | gen 25 | gen 50 | gen 75 | gen 100 |
+|----------------------------------------+--------+--------+--------+---------|
+| Unbalanced                             | 25%    | 50%    | 54%    | 62%     |
+| Balanced                               | 22%    | 19%    | 51%    | 62%     |
+- The T and S errors are now similar (both ~0.02), but the strength reached is the same; balanced was slower
+  in the middle. Self-play is still ~95% tiger wins, from the random sheep moves.
+- "vs prev" stays at ~50% because after 4 random plies both sides play deterministically; it says little.
