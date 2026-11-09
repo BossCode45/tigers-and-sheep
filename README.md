@@ -39,8 +39,15 @@ With plain Rust (no Nix), `cargo` from a recent stable toolchain works too.
 - **Click a move in the history** to go back to just before it.
 - **q**, **Esc** or **Ctrl+C** quits.
 
-Which players `cargo run` uses is set in `src/main.rs`: `LocalPlayer` (you, with the mouse) or
-`ClaudePlayer` (the minimax computer player) on either side.
+By default the computer plays itself. Pick the players with `--sheep` and `--tiger`: `human`
+(you, with the mouse), `claude` (the minimax computer player), or a weights file for a neural
+player. `--time` sets how many seconds a computer player may think per move (default 2).
+
+```bash
+cargo run --release -- --sheep human --tiger claude --time 5
+```
+
+`--help` lists every command and option.
 
 ## Computer players
 
@@ -64,6 +71,8 @@ and against `ClaudePlayer`. The score against `ClaudePlayer` is the best guide t
 
 Each generation is saved as `gen-NNN.bin`, and the newest as `latest.bin`. Running `train` again
 carries on from the newest generation in the folder. `--from` starts from any weights file instead.
+The other training settings (search depth, ε, λ, epochs and so on) are options too; see
+`train --help`.
 
 Then play against it, as sheep (the default) or as tigers:
 
