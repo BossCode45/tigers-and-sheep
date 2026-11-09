@@ -67,8 +67,8 @@ cargo run --release -- train [generations] [games per generation] [out dir] [--f
 ```
 
 The defaults are 50 generations of 500 games, saved to `weights/`. Each generation, the network
-plays itself, learns from how those games went, then plays matches against the previous generation
-and against `ClaudePlayer`. The score against `ClaudePlayer` is the best guide to progress.
+plays itself and learns from how those games went. Every 10 generations (`--match-every`) it also
+plays matches against the generation it last tested (10 generations back) and against `ClaudePlayer`. The score against `ClaudePlayer` is the best guide to progress.
 `ClaudePlayer` is only a yardstick, never something the network learns from.
 
 Each generation is saved as `gen-NNN.bin`, and the newest as `latest.bin`. Running `train` again

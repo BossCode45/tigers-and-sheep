@@ -81,6 +81,20 @@ Before the fix, tigers won ~97% of self-play games and the net only reached ~15-
 *** Next candidates
 - Pick exploratory moves among near-best ones (softmax over root scores) rather than uniformly
 - Sheep are still the weaker side: report the match score for each side separately
+** DONE Multi-threaded training steps
+=gradient= and =loss= run on rayon's pool in fixed chunks (32 samples per gradient task), summed
+in order, so 1 thread and 16 give byte-identical weights. Self-play's =parallel()= uses the same pool.
+=train 4 500= from random weights, 16 cores, hpet clocksource, training part of each generation (s):
+| Gen | Samples | Before | After |
+|-----+---------+--------+-------|
+|   1 |   15112 |   0.09 |  0.03 |
+|   2 |   29658 |   0.17 |  0.06 |
+|   3 |   43748 |   0.27 |  0.09 |
+|   4 |   57978 |   0.35 |  0.13 |
+- About 2.7x, not 16x: a 256-sample batch is only 8 chunks, and the chunks' gradients are added
+  up serially. Training was only ~15% of a ~2 s generation, so the whole generation is ~10% faster.
+*** Next candidates
+- Bigger batches (or smaller chunks) for more parallel tasks per step; reuse the per-chunk gradient buffers
 ** DONE Balance tiger-win and sheep-win positions
 The unbalanced net (gen 100) had 7x the error on positions from sheep-win games (0.045) as on
 tiger-win ones (0.0065), so it leaned towards tiger wins, though not a constant prediction (that

@@ -1,5 +1,7 @@
 use std::{fs, io, path::Path};
 
+use rayon::prelude::*;
+
 use crate::board::{GameBoard, Turn};
 
 /// Inputs: a bit per point for tigers (0..25) and for sheep (25..50), the sheep in hand over 20
@@ -23,6 +25,12 @@ const B2: usize = W2 + HIDDEN1 * HIDDEN2;
 const W3: usize = B2 + HIDDEN2;
 const B3: usize = W3 + HIDDEN2;
 pub const PARAMS: usize = B3 + 1;
+
+/// Samples per parallel task in `gradient`. The chunks are a fixed size and summed in order, so
+/// the result is the same whatever the number of threads.
+const GRAD_CHUNK: usize = 32;
+/// Samples per parallel task in `loss`, where each one is only a forward pass.
+const LOSS_CHUNK: usize = 1024;
 
 const MAGIC: &[u8; 4] = b"TSNN";
 const VERSION: u32 = 1;
@@ -224,11 +232,30 @@ impl Network
 		err * err / 2.0
 	}
 
+	/// The gradient of the error summed over `batch`, and that summed error, worked out in
+	/// `GRAD_CHUNK`-sized pieces across all cores.
+	fn gradient(&self, batch: &[Sample]) -> (Vec<f32>, f32)
+	{
+		let parts: Vec<(Vec<f32>, f32)> = batch.par_chunks(GRAD_CHUNK).map(|chunk|
+		{
+			let mut grad = vec![0.0; PARAMS];
+			let loss = chunk.iter().map(|s| self.add_gradient(s, &mut grad)).sum();
+			(grad, loss)
+		}).collect();
+		let mut grad = vec![0.0; PARAMS];
+		let mut loss = 0.0;
+		for (g, l) in parts
+		{
+			grad.iter_mut().zip(&g).for_each(|(a, b)| *a += b);
+			loss += l;
+		}
+		(grad, loss)
+	}
+
 	/// One optimiser step on the mean error over `batch`; returns that mean error.
 	pub fn train_batch(&mut self, batch: &[Sample], adam: &mut Adam) -> f32
 	{
-		let mut grad = vec![0.0; PARAMS];
-		let loss: f32 = batch.iter().map(|s| self.add_gradient(s, &mut grad)).sum();
+		let (mut grad, loss) = self.gradient(batch);
 		let n = batch.len().max(1) as f32;
 		for g in &mut grad
 		{
@@ -241,7 +268,11 @@ impl Network
 	/// The mean error over `samples`, without training.
 	pub fn loss(&self, samples: &[Sample]) -> f32
 	{
-		let total: f32 = samples.iter().map(|s| { let e = self.forward(&s.board, s.turn) - s.target; e * e / 2.0 }).sum();
+		let parts: Vec<f32> = samples.par_chunks(LOSS_CHUNK)
+			.map(|chunk| chunk.iter().map(|s| { let e = self.forward(&s.board, s.turn) - s.target; e * e / 2.0 }).sum())
+			.collect();
+		// A fold from 0, since an empty f32 `sum` is -0
+		let total = parts.into_iter().fold(0.0, |a, b| a + b);
 		total / samples.len().max(1) as f32
 	}
 
@@ -377,6 +408,57 @@ mod tests
 			checked += 1;
 		}
 		assert!(checked > 3000);
+	}
+
+	#[test]
+	fn parallel_gradient_matches_serial()
+	{
+		let net = Network::random(5);
+		// Not a multiple of GRAD_CHUNK, so the last chunk is short
+		let batch = samples(GRAD_CHUNK * 4 + 7, 9);
+		let (grad, loss) = net.gradient(&batch);
+
+		// The same chunks, one after another, give exactly the same sums
+		let mut serial = vec![0.0; PARAMS];
+		let mut serial_loss = 0.0;
+		for chunk in batch.chunks(GRAD_CHUNK)
+		{
+			let mut g = vec![0.0; PARAMS];
+			serial_loss += chunk.iter().map(|s| net.add_gradient(s, &mut g)).sum::<f32>();
+			serial.iter_mut().zip(&g).for_each(|(a, b)| *a += b);
+		}
+		assert_eq!(grad, serial);
+		assert_eq!(loss, serial_loss);
+
+		// And one running sum gives nearly the same
+		let mut plain = vec![0.0; PARAMS];
+		let plain_loss: f32 = batch.iter().map(|s| net.add_gradient(s, &mut plain)).sum();
+		assert!((loss - plain_loss).abs() < 1e-4 * plain_loss.abs().max(1.0));
+		for (a, b) in grad.iter().zip(&plain)
+		{
+			assert!((a - b).abs() < 1e-4 * b.abs().max(1.0), "{a} vs {b}");
+		}
+	}
+
+	#[test]
+	fn training_is_the_same_on_any_number_of_threads()
+	{
+		let train = |threads: usize|
+		{
+			let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+			pool.install(||
+			{
+				let mut net = Network::random(2);
+				let data = samples(300, 4);
+				let mut adam = Adam::new(1e-3);
+				for batch in data.chunks(100)
+				{
+					net.train_batch(batch, &mut adam);
+				}
+				(net, Network::random(3).loss(&samples(3000, 6)))
+			})
+		};
+		assert_eq!(train(1), train(4));
 	}
 
 	#[test]

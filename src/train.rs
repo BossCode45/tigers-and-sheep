@@ -1,4 +1,6 @@
-use std::{collections::VecDeque, fs, path::{Path, PathBuf}, sync::atomic::{AtomicUsize, Ordering}, time::{Duration, Instant}};
+use std::{collections::VecDeque, fs, path::{Path, PathBuf}, time::{Duration, Instant}};
+
+use rayon::prelude::*;
 
 use crate::{board::{repetitions, GameBoard, Move, Outcome, Turn, REPETITION_DRAW, SYMMETRIES}, claude_player::ClaudePlayer, network::{Adam, Network, Rng, Sample}, neural_player::NeuralPlayer, player::{MinimaxPlayer, Player}};
 
@@ -29,8 +31,11 @@ pub struct Config
 	pub epochs: usize,
 	pub batch_size: usize,
 	pub learning_rate: f32,
-	/// Games against `ClaudePlayer`, and against the previous generation, after each generation (half as each side).
+	/// Games against `ClaudePlayer`, and against the generation that last played these matches (half as each side).
 	pub match_games: usize,
+	/// Play those matches only on generations whose number is a multiple of this, so generation
+	/// N plays generation N - `match_every`.
+	pub match_every: usize,
 }
 
 impl Default for Config
@@ -54,6 +59,7 @@ impl Default for Config
 			batch_size: 256,
 			learning_rate: 1e-3,
 			match_games: 100,
+			match_every: 10,
 		}
 	}
 }
@@ -128,27 +134,7 @@ fn td_targets(plies: &[Ply], outcome: Outcome, lambda: f32) -> Vec<f32>
 /// Runs `f(0..n)` across all cores, returning the results in order.
 fn parallel<T: Send>(n: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T>
 {
-	let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(n.max(1));
-	let next = AtomicUsize::new(0);
-	let mut results: Vec<(usize, T)> = std::thread::scope(|s|
-	{
-		let handles: Vec<_> = (0..threads).map(|_| s.spawn(||
-		{
-			let mut done = Vec::new();
-			loop
-			{
-				let i = next.fetch_add(1, Ordering::Relaxed);
-				if i >= n
-				{
-					return done;
-				}
-				done.push((i, f(i)));
-			}
-		})).collect();
-		handles.into_iter().flat_map(|h| h.join().expect("worker thread panicked")).collect()
-	});
-	results.sort_by_key(|(i, _)| *i);
-	results.into_iter().map(|(_, r)| r).collect()
+	(0..n).into_par_iter().map(&f).collect()
 }
 
 /// A player that searches exactly `depth` plies.
@@ -270,13 +256,15 @@ pub fn run(cfg: &Config) -> std::io::Result<()>
 		}
 		None => Network::random(0x5EED),
 	};
+	// The opponent for the first matches, if the generation they should be against isn't saved
+	let initial = net.clone();
 	let mut adam = Adam::new(cfg.learning_rate);
 	// For each generation, its positions from tiger-win, sheep-win and drawn games
 	let mut buffer: VecDeque<[Vec<Sample>; 3]> = VecDeque::new();
 	let mut rng = Rng::new(first as u64);
 	println!("Self-play results, then the mean error on positions from tiger-win (T) and sheep-win (S) games, before and after training");
-	println!("{:>4} {:>7} {:>6} {:>6} {:>6} {:>8} {:>8} {:>8} {:>8} {:>7} {:>9} {:>7}",
-		"gen", "trained", "tigers", "sheep", "draws", "T before", "S before", "T after", "S after", "vs prev", "vs Claude", "time s");
+	println!("{:>4} {:>7} {:>6} {:>6} {:>6} {:>8} {:>8} {:>8} {:>8} {:>7} {:>9} {:>7} {:>7}",
+		"gen", "trained", "tigers", "sheep", "draws", "T before", "S before", "T after", "S after", "vs prev", "vs Claude", "train s", "time s");
 	for generation in first..first + cfg.generations
 	{
 		let start = Instant::now();
@@ -290,10 +278,11 @@ pub fn run(cfg: &Config) -> std::io::Result<()>
 			buffer.pop_front();
 		}
 
+		// Training: the losses before and after, and every epoch
+		let train_start = Instant::now();
 		let pools: [Vec<Sample>; 3] = [0, 1, 2].map(|k| buffer.iter().flat_map(|g| &g[k]).copied().collect());
 		let losses = |net: &Network| (net.loss(&pools[0]), net.loss(&pools[1]));
 		let before = losses(&net);
-		let previous = net.clone();
 		let mut trained = 0;
 		for _ in 0..cfg.epochs
 		{
@@ -314,13 +303,28 @@ pub fn run(cfg: &Config) -> std::io::Result<()>
 			}
 		}
 		let after = losses(&net);
+		let train_time = train_start.elapsed();
 
-		let vs_prev = match_score(&net, || neural(&previous, cfg.depth), cfg, seed_base ^ 0xA);
-		let vs_claude = match_score(&net, || claude(cfg.depth), cfg, seed_base ^ 0xB);
+		// The matches are slow and only measure progress, so they are only played now and then
+		let every = cfg.match_every.max(1);
+		let (vs_prev, vs_claude) = if generation.is_multiple_of(every)
+		{
+			// Against the generation that last played them, read back from its file, so a rerun
+			// that carries on from the out dir still finds it
+			let last = cfg.out_dir.join(format!("gen-{:03}.bin", generation - every));
+			let previous = Network::load(&last).unwrap_or_else(|_| initial.clone());
+			let percent = |score: f32| format!("{:.0}%", score * 100.0);
+			(percent(match_score(&net, || neural(&previous, cfg.depth), cfg, seed_base ^ 0xA)),
+				percent(match_score(&net, || claude(cfg.depth), cfg, seed_base ^ 0xB)))
+		}
+		else
+		{
+			("-".to_string(), "-".to_string())
+		};
 		net.save(&cfg.out_dir.join(format!("gen-{generation:03}.bin")))?;
 		net.save(&cfg.out_dir.join("latest.bin"))?;
-		println!("{generation:>4} {trained:>7} {tigers:>6} {sheep:>6} {draws:>6} {:>8.4} {:>8.4} {:>8.4} {:>8.4} {:>6.0}% {:>8.0}% {:>7.1}",
-			before.0, before.1, after.0, after.1, vs_prev * 100.0, vs_claude * 100.0, start.elapsed().as_secs_f64());
+		println!("{generation:>4} {trained:>7} {tigers:>6} {sheep:>6} {draws:>6} {:>8.4} {:>8.4} {:>8.4} {:>8.4} {vs_prev:>7} {vs_claude:>9} {:>7.2} {:>7.1}",
+			before.0, before.1, after.0, after.1, train_time.as_secs_f64(), start.elapsed().as_secs_f64());
 	}
 	Ok(())
 }

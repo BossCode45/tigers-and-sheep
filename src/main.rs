@@ -145,9 +145,12 @@ struct TrainArgs
 	/// Adam's learning rate
 	#[arg(long, default_value_t = train::Config::default().learning_rate)]
 	learning_rate: f32,
-	/// Games against ClaudePlayer, and against the previous generation, after each generation
+	/// Games against ClaudePlayer, and against the generation that last played them
 	#[arg(long, default_value_t = train::Config::default().match_games)]
 	match_games: usize,
+	/// Play those matches only every this many generations
+	#[arg(long, default_value_t = train::Config::default().match_every)]
+	match_every: usize,
 }
 
 impl From<TrainArgs> for train::Config
@@ -171,6 +174,7 @@ impl From<TrainArgs> for train::Config
 			batch_size: args.batch_size,
 			learning_rate: args.learning_rate,
 			match_games: args.match_games,
+			match_every: args.match_every,
 		}
 	}
 }

@@ -10,6 +10,7 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4.6.7", features = ["derive"] }
 ratatui = "0.30.2"
+rayon = "1.12.0"
 
 [features]
 # Count nodes, cache hits and cutoffs during the search, for `bench`.
