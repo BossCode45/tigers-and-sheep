@@ -92,5 +92,6 @@ cargo run --profile profiling -- bench [depth]
 
 `bench` searches six fixed positions to a fixed depth and prints each move, score and time. Add
 `--features search-stats` to also count nodes, cache hits and cutoffs. `plans.org` keeps a history
-of the optimisations and training experiments, with their results. `CLAUDE.md` describes the code's
-structure in more depth.
+of the optimisations and training experiments, with their results. [`docs/`](docs/README.md)
+explains how the search and training work, how the code is structured, how to build it, and how to
+add a new player.
