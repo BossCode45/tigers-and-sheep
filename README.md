@@ -76,10 +76,10 @@ carries on from the newest generation in the folder. `--from` starts from any we
 The other training settings (search depth, ε, λ, epochs and so on) are options too; see
 `train --help`.
 
-Then play against it, as sheep (the default) or as tigers:
+Then play against it by giving its weights file as one of the players:
 
 ```bash
-cargo run --release -- neural weights/latest.bin tiger
+cargo run --release -- --sheep human --tiger weights/latest.bin
 ```
 
 ## Development

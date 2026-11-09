@@ -1,6 +1,6 @@
 use std::{path::PathBuf, time::Duration};
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand};
 
 use crate::{board::Outcome, claude_player::ClaudePlayer, game::GameHandler, local_player::LocalPlayer, network::Network, neural_player::NeuralPlayer, player::Player};
 
@@ -35,18 +35,6 @@ enum Command
 {
 	/// Play a game in the terminal (the default)
 	Play(PlayArgs),
-	/// Play against a trained network
-	Neural
-	{
-		/// Weights file written by `train`
-		weights: PathBuf,
-		/// The side you play
-		#[arg(value_enum, default_value_t = Side::Sheep)]
-		side: Side,
-		/// Seconds the network may think per move
-		#[arg(short, long, default_value_t = 2.0)]
-		time: f64,
-	},
 	/// Time the computer player's search on fixed positions, without the TUI
 	Bench
 	{
@@ -91,13 +79,6 @@ fn parse_player(s: &str) -> Result<PlayerKind, String>
 		path if PathBuf::from(path).is_file() => Ok(PlayerKind::Neural(path.into())),
 		_ => Err(format!("expected `human`, `claude` or a weights file, but `{s}` is none of these")),
 	}
-}
-
-#[derive(Clone, Copy, ValueEnum)]
-enum Side
-{
-	Sheep,
-	Tiger,
 }
 
 #[derive(Args)]
@@ -190,17 +171,6 @@ fn main() -> std::io::Result<()>
 			Ok(())
 		}
 		Some(Command::Train(args)) => train::run(&args.into()),
-		Some(Command::Neural { weights, side, time }) =>
-		{
-			let human = PlayerKind::Human;
-			let computer = PlayerKind::Neural(weights);
-			let (sheep, tiger) = match side
-			{
-				Side::Sheep => (human, computer),
-				Side::Tiger => (computer, human),
-			};
-			play(PlayArgs { sheep, tiger, time })
-		}
 		Some(Command::Play(args)) => play(args),
 		None => play(cli.play),
 	}
