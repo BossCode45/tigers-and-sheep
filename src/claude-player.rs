@@ -92,12 +92,12 @@ mod tests
 	fn pick_move_reports_its_search()
 	{
 		let mut player = ClaudePlayer::new(Duration::from_millis(50));
-		let m = player.pick_move(GameBoard::default(), Turn::Tiger).unwrap();
+		let m = player.pick_move(GameBoard::default(), Turn::Tiger, &[]).unwrap();
 		let report = player.last_search.expect("a report");
 		assert_eq!(report.mv, m);
 		assert!(report.depth >= 1);
 		assert_eq!(report.score, player.minimax(GameBoard::default(), Turn::Tiger, report.depth,
-			f32::NEG_INFINITY, f32::INFINITY, None).unwrap());
+			f32::NEG_INFINITY, f32::INFINITY, None, &mut Vec::new()).unwrap());
 
 		player.reset();
 		assert_eq!(player.last_search, None);

@@ -59,10 +59,10 @@ mod tests
 		let mut player = NeuralPlayer::new(Network::random(2), Duration::from_secs(3600), 12);
 		player.max_depth = 3;
 		let board = GameBoard::default();
-		let m = player.pick_move(board, Turn::Sheep).unwrap();
+		let m = player.pick_move(board, Turn::Sheep, &[]).unwrap();
 		assert_eq!(board.check_move(m), Ok(()));
 		let report = player.last_search.expect("a report");
 		assert_eq!((report.mv, report.depth), (m, 3));
-		assert_eq!(report.score, player.minimax(board, Turn::Sheep, 3, f32::NEG_INFINITY, f32::INFINITY, None).unwrap());
+		assert_eq!(report.score, player.minimax(board, Turn::Sheep, 3, f32::NEG_INFINITY, f32::INFINITY, None, &mut Vec::new()).unwrap());
 	}
 }

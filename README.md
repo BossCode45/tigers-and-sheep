@@ -16,6 +16,8 @@ and diagonals run through every other point (those where x + y is even).
 - Sheep move first, then the sides take turns.
 - **Tigers win** by killing 5 sheep. **Either side wins** if the other has no legal move on its
   turn, so sheep win by trapping every tiger.
+- **Draw:** the game is drawn when the same position, with the same side to move, comes up for the
+  third time, as in chess.
 
 ## Running
 

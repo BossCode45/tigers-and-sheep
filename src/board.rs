@@ -45,6 +45,54 @@ impl Turn
 	}
 }
 
+/// How a game ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Outcome
+{
+	Tiger,
+	Sheep,
+	Draw,
+}
+
+impl Outcome
+{
+	pub const ALL: [Outcome; 3] = [Outcome::Tiger, Outcome::Sheep, Outcome::Draw];
+
+	/// The win for `turn`'s side.
+	pub fn win(turn: Turn) -> Self
+	{
+		match turn { Turn::Tiger => Outcome::Tiger, Turn::Sheep => Outcome::Sheep }
+	}
+
+	/// +1 for a tiger win, -1 for a sheep win, matching the sign of the scores.
+	pub fn value(self) -> f32
+	{
+		match self { Outcome::Tiger => 1.0, Outcome::Sheep => -1.0, Outcome::Draw => 0.0 }
+	}
+}
+
+/// A position seen this many times before, with the same side to move, is a draw:
+/// the third occurrence, as in chess.
+pub const REPETITION_DRAW: usize = 2;
+
+/// How many times `board` came up before with the same side to move. `previous` is the boards
+/// before it, oldest first, so the last one had the other side to move.
+///
+/// Placing a sheep and killing one can't be undone, so the scan stops at the first board with a
+/// different number of sheep, and nothing repeats while sheep are still in hand.
+pub fn repetitions(previous: &[GameBoard], board: &GameBoard) -> usize
+{
+	if board.sheep_left() > 0
+	{
+		return 0;
+	}
+	let sheep = board.sheep_count();
+	previous.iter().rev().skip(1).step_by(2)
+		.take_while(|b| b.sheep_left() == 0 && b.sheep_count() == sheep)
+		.filter(|&b| b == board)
+		.count()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Move
 {
@@ -1364,6 +1412,76 @@ mod tests
 		assert!(board.get_moves(Turn::Sheep).is_empty());
 		assert!(board.check_win(Turn::Sheep));
 		assert!(!board.check_win(Turn::Tiger));
+	}
+
+	// --- repetitions ---
+
+	/// Movement phase: a tiger at a5 and sheep at e1 and d1, none in hand.
+	fn shuffle_board() -> GameBoard
+	{
+		let mut board = GameBoard::EMPTY;
+		board.set((0, 0), PieceType::Tiger);
+		board.set((4, 4), PieceType::Sheep);
+		board.set((3, 4), PieceType::Sheep);
+		board
+	}
+
+	/// The boards from `shuffle_board` with the tiger stepping a5-b5-a5 and a sheep e1-e2-e1, `cycles` times.
+	fn shuffle(cycles: usize) -> Vec<GameBoard>
+	{
+		let moves = [
+			Move::MoveTiger { from: (0, 0), to: (1, 0) },
+			Move::MoveSheep { from: (4, 4), to: (4, 3) },
+			Move::MoveTiger { from: (1, 0), to: (0, 0) },
+			Move::MoveSheep { from: (4, 3), to: (4, 4) },
+		];
+		let mut boards = vec![shuffle_board()];
+		for m in moves.iter().cycle().take(4 * cycles)
+		{
+			let next = boards.last().unwrap().after_move_unchecked(*m);
+			boards.push(next);
+		}
+		boards
+	}
+
+	#[test]
+	fn repetitions_count_earlier_occurrences()
+	{
+		let boards = shuffle(2);
+		assert_eq!(repetitions(&[], &boards[0]), 0);
+		assert_eq!(repetitions(&boards[..4], &boards[4]), 1);
+		assert_eq!(repetitions(&boards[..8], &boards[8]), 2);
+		// After the tiger's move: b5 came up once before, with sheep to move
+		assert_eq!(repetitions(&boards[..5], &boards[5]), 1);
+	}
+
+	#[test]
+	fn repetitions_need_the_same_side_to_move()
+	{
+		let board = shuffle_board();
+		let other = shuffle(1)[1];
+		// The same board, but with the other side to move
+		assert_eq!(repetitions(&[board], &board), 0);
+		assert_eq!(repetitions(&[board, other, board], &board), 0);
+		assert_eq!(repetitions(&[board, other], &board), 1);
+	}
+
+	#[test]
+	fn repetitions_stop_at_a_kill()
+	{
+		let boards = shuffle(1);
+		let mut killed = boards[2];
+		killed.set((3, 4), PieceType::Empty);
+		// An identical board from before a kill doesn't count
+		let previous = [boards[0], boards[1], killed, boards[3]];
+		assert_eq!(repetitions(&previous, &boards[4]), 0);
+	}
+
+	#[test]
+	fn nothing_repeats_with_sheep_in_hand()
+	{
+		let board = GameBoard::default();
+		assert_eq!(repetitions(&[board, board], &board), 0);
 	}
 
 	// --- symmetries ---

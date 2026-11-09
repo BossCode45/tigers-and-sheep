@@ -50,6 +50,20 @@ source, so the times are only comparable with each other; moves and scores uncha
 - =evaluate=: tiger moves and trapped tigers from bitmasks rather than =get_moves= + 25 =get()= calls
 - Table lookups are now the top item (~28% of cycles), mostly cache misses into the 24 MB table
 * Draws
+** DONE Threefold repetition
+The game is drawn on the third occurrence of a position. The search scores the first repetition
+on its path (game history plus search line) as 0. =bench 9= (hpet clocksource), before -> after:
+| Position         | Move        | Score     | Time ms     | Repetitions |
+|------------------+-------------+-----------+-------------+-------------|
+| opening          | sc5         | 40        | 160 -> 161  |           0 |
+| tiger reply      | ta1b2       | 50        | 230 -> 232  |           0 |
+| mid-placement    | se2         | 22        | 92 -> 97    |           0 |
+| end of placement | sc4 -> sc3  | 91 -> 77  | 5 -> 7      |          19 |
+| early movement   | td2c3       | 212       | 40 -> 41    |         102 |
+| movement         | sc4d4       | 214       | 58 -> 60    |         421 |
+| total            |             |           | 584 -> 598  |             |
+- About 2% slower overall, from scanning the path at every node.
+- The cache ignores the path, so scores near repetitions can be slightly off (graph-history interaction).
 * Neural player training
 ** DONE Tiger bias in self-play
 Before the fix, tigers won ~97% of self-play games and the net only reached ~15-20% against

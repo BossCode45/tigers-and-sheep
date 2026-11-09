@@ -1,6 +1,6 @@
 use std::{collections::VecDeque, fs, path::{Path, PathBuf}, sync::atomic::{AtomicUsize, Ordering}, time::{Duration, Instant}};
 
-use crate::{board::{GameBoard, Move, Turn, SYMMETRIES}, claude_player::ClaudePlayer, network::{Adam, Network, Rng, Sample}, neural_player::NeuralPlayer, player::{MinimaxPlayer, Player}};
+use crate::{board::{repetitions, GameBoard, Move, Outcome, Turn, REPETITION_DRAW, SYMMETRIES}, claude_player::ClaudePlayer, network::{Adam, Network, Rng, Sample}, neural_player::NeuralPlayer, player::{MinimaxPlayer, Player}};
 
 /// Settings for `run`.
 #[derive(Clone, Debug)]
@@ -58,25 +58,6 @@ impl Default for Config
 	}
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Outcome
-{
-	Tiger,
-	Sheep,
-	Draw,
-}
-
-impl Outcome
-{
-	const ALL: [Outcome; 3] = [Outcome::Tiger, Outcome::Sheep, Outcome::Draw];
-
-	/// +1 for a tiger win, -1 for a sheep win, matching the sign of the scores.
-	fn value(self) -> f32
-	{
-		match self { Outcome::Tiger => 1.0, Outcome::Sheep => -1.0, Outcome::Draw => 0.0 }
-	}
-}
-
 /// A position from a game, with the searching player's score for it (clamped to -1..1).
 #[derive(Clone, Copy, Debug)]
 struct Ply
@@ -88,24 +69,29 @@ struct Ply
 	random: bool,
 }
 
-/// Plays one game from the start. `choose` gives the move and score for a position; for the
-/// first `random_plies` plies, and with chance `epsilon` after, a random move is played instead
-/// (the position keeps `choose`'s score, and is marked `random` unless the two moves are the same).
-fn play(mut choose: impl FnMut(GameBoard, Turn) -> (Move, f32), ply_cap: usize, random_plies: usize, epsilon: f32, rng: &mut Rng)
+/// Plays one game from the start. `choose` gives the move and score for a position, given the
+/// boards before it; for the first `random_plies` plies, and with chance `epsilon` after, a random
+/// move is played instead (the position keeps `choose`'s score, and is marked `random` unless the
+/// two moves are the same). A threefold repetition, or reaching `ply_cap`, is a draw.
+fn play(mut choose: impl FnMut(GameBoard, Turn, &[GameBoard]) -> (Move, f32), ply_cap: usize, random_plies: usize, epsilon: f32, rng: &mut Rng)
 	-> (Outcome, Vec<Ply>)
 {
 	let mut board = GameBoard::default();
 	let mut turn = Turn::Sheep;
 	let mut plies = Vec::new();
+	let mut previous = Vec::new();
 	while plies.len() < ply_cap
 	{
 		if board.check_win(turn)
 		{
 			// The side that just moved has won
-			let winner = match turn { Turn::Sheep => Outcome::Tiger, Turn::Tiger => Outcome::Sheep };
-			return (winner, plies);
+			return (Outcome::win(turn.next_turn()), plies);
 		}
-		let (searched, score) = choose(board, turn);
+		if repetitions(&previous, &board) >= REPETITION_DRAW
+		{
+			return (Outcome::Draw, plies);
+		}
+		let (searched, score) = choose(board, turn, &previous);
 		let mut m = searched;
 		if plies.len() < random_plies || rng.next_f32() < epsilon
 		{
@@ -113,6 +99,7 @@ fn play(mut choose: impl FnMut(GameBoard, Turn) -> (Move, f32), ply_cap: usize, 
 			m = moves[rng.below(moves.len())];
 		}
 		plies.push(Ply { board, turn, score: score.clamp(-1.0, 1.0), random: m != searched });
+		previous.push(board);
 		board.make_move_unchecked(m);
 		turn = turn.next_turn();
 	}
@@ -180,9 +167,9 @@ fn claude(depth: usize) -> ClaudePlayer
 }
 
 /// The move a minimax player picks, and the score it gave it.
-fn search(player: &mut (impl MinimaxPlayer + Player), board: GameBoard, turn: Turn) -> (Move, f32)
+fn search(player: &mut (impl MinimaxPlayer + Player), board: GameBoard, turn: Turn, previous: &[GameBoard]) -> (Move, f32)
 {
-	let m = player.pick_move(board, turn).expect("the game is not over, so there is a move");
+	let m = player.pick_move(board, turn, previous).expect("the game is not over, so there is a move");
 	(m, player.last_search().map_or(0.0, |r| r.score))
 }
 
@@ -191,7 +178,7 @@ fn self_play(net: &Network, cfg: &Config, seed: u64) -> (Outcome, Vec<Sample>)
 {
 	let mut player = neural(net, cfg.depth);
 	let mut rng = Rng::new(seed);
-	let (outcome, plies) = play(|b, t| search(&mut player, b, t), cfg.ply_cap, cfg.random_plies, cfg.epsilon, &mut rng);
+	let (outcome, plies) = play(|b, t, p| search(&mut player, b, t, p), cfg.ply_cap, cfg.random_plies, cfg.epsilon, &mut rng);
 	let targets = td_targets(&plies, outcome, cfg.lambda);
 	let samples = plies.iter().zip(targets).map(|(p, target)| Sample { board: p.board, turn: p.turn, target }).collect();
 	(outcome, samples)
@@ -208,7 +195,7 @@ fn match_score<P: MinimaxPlayer + Player>(net: &Network, opponent: impl Fn() -> 
 		let mut them = opponent();
 		let neural_side = if i % 2 == 0 { Turn::Sheep } else { Turn::Tiger };
 		let mut rng = Rng::new(seed ^ (i / 2) as u64);
-		let (outcome, _) = play(|b, t| if t == neural_side { search(&mut me, b, t) } else { search(&mut them, b, t) },
+		let (outcome, _) = play(|b, t, p| if t == neural_side { search(&mut me, b, t, p) } else { search(&mut them, b, t, p) },
 			cfg.ply_cap, 4, 0.0, &mut rng);
 		match (outcome, neural_side)
 		{
@@ -389,9 +376,11 @@ mod tests
 			assert!(w[0].board.get_moves(w[0].turn).iter().any(|&m| w[0].board.after_move_unchecked(m) == w[1].board));
 		}
 		assert!(samples.iter().all(|s| (-1.0..=1.0).contains(&s.target)));
+		// A draw is the ply cap, or a position coming up a third time (the last time isn't a sample)
+		let repeated = samples.iter().any(|s| samples.iter().filter(|o| o.board == s.board && o.turn == s.turn).count() >= 2);
 		if outcome == Outcome::Draw
 		{
-			assert_eq!(samples.len(), cfg.ply_cap);
+			assert!(samples.len() == cfg.ply_cap || repeated);
 		}
 	}
 

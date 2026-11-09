@@ -10,7 +10,7 @@ use ratatui::{
 	DefaultTerminal, Frame,
 };
 
-use crate::{board::{GameBoard, Move, Turn}, board_view::{pos_at, BoardView}, player::{Input, Player}};
+use crate::{board::{repetitions, GameBoard, Move, Outcome, Turn, REPETITION_DRAW}, board_view::{pos_at, BoardView}, player::{Input, Player}};
 
 /// Runs a game in the terminal: draws the board, the move history and the current player's panel,
 /// and passes mouse clicks on the board to the player whose turn it is.
@@ -64,11 +64,23 @@ impl GameHandler
 		if self.history.len().is_multiple_of(2) { Turn::Sheep } else { Turn::Tiger }
 	}
 
-	/// The side that has won, if the game is over.
-	pub fn winner(&self) -> Option<Turn>
+	/// The boards before the current one, oldest first.
+	pub fn previous(&self) -> Vec<GameBoard>
 	{
+		std::iter::once(self.start).chain(self.history.iter().map(|&(_, board)| board))
+			.take(self.history.len()).collect()
+	}
+
+	/// How the game ended, if it is over: a win, or a draw once a position comes up a third time.
+	pub fn outcome(&self) -> Option<Outcome>
+	{
+		let (board, turn) = (self.board(), self.turn());
 		// check_win runs before `turn`'s move, so whoever moved last has won.
-		self.board().check_win(self.turn()).then(|| self.turn().next_turn())
+		if board.check_win(turn)
+		{
+			return Some(Outcome::win(turn.next_turn()));
+		}
+		(repetitions(&self.previous(), &board) >= REPETITION_DRAW).then_some(Outcome::Draw)
 	}
 
 	/// Play `m` for the side to move. Panics if it is illegal.
@@ -86,8 +98,8 @@ impl GameHandler
 	}
 
 	/// Play in the terminal with `p1` as the sheep and `p2` as the tigers, until someone wins and
-	/// the user quits. Returns the winner, or None if the user quit before the game was won.
-	pub fn play_game(&mut self, p1: &mut dyn Player, p2: &mut dyn Player) -> io::Result<Option<Turn>>
+	/// the user quits. Returns how it ended, or None if the user quit before the game was over.
+	pub fn play_game(&mut self, p1: &mut dyn Player, p2: &mut dyn Player) -> io::Result<Option<Outcome>>
 	{
 		let mut terminal = ratatui::init();
 		let result = execute!(io::stdout(), EnableMouseCapture)
@@ -97,19 +109,19 @@ impl GameHandler
 		result
 	}
 
-	fn run(&mut self, terminal: &mut DefaultTerminal, mut players: [&mut dyn Player; 2]) -> io::Result<Option<Turn>>
+	fn run(&mut self, terminal: &mut DefaultTerminal, mut players: [&mut dyn Player; 2]) -> io::Result<Option<Outcome>>
 	{
 		let idx = |turn: Turn| match turn { Turn::Sheep => 0, Turn::Tiger => 1 };
 		loop
 		{
 			let (board, turn) = (self.board(), self.turn());
-			let over = self.winner().is_some();
+			let over = self.outcome().is_some();
 			players[idx(turn)].update(board, turn);
 			// Drawn before `pick_move`, so a computer's "thinking" panel is on screen while it searches
 			terminal.draw(|frame| self.draw(frame, &players))?;
 
 			let player = &mut *players[idx(turn)];
-			let action = match (!over).then(|| player.pick_move(board, turn)).flatten()
+			let action = match (!over).then(|| player.pick_move(board, turn, &self.previous())).flatten()
 			{
 				// Input that came in during the search goes first, so a quit or a revert isn't
 				// lost when both players are computers and nothing ever waits for input
@@ -120,7 +132,7 @@ impl GameHandler
 			match action
 			{
 				Action::None => (),
-				Action::Quit => return Ok(self.winner()),
+				Action::Quit => return Ok(self.outcome()),
 				Action::Play(m) => self.play(m),
 				Action::Revert(i) =>
 				{
@@ -188,20 +200,26 @@ impl GameHandler
 		let [board_pane, history_pane] = Layout::horizontal([Constraint::Min(0), Constraint::Length(20)]).spacing(-1).areas(top);
 		let [current_pane, last_pane] = Layout::horizontal([Constraint::Percentage(70), Constraint::Fill(1)]).spacing(-1).areas(bottom);
 
-		let winner = self.winner();
+		let outcome = self.outcome();
 		let turn = self.turn();
 		let player = &*players[match turn { Turn::Sheep => 0, Turn::Tiger => 1 }];
 
 		// The bottom row is drawn first, so the top row's bottom titles (keybinds, revert hint)
 		// land on the shared border line over it. Its own titles go on its bottom border.
 		// Player output, or the result once the game is over
-		match winner
+		match outcome
 		{
-			Some(w) =>
+			Some(o) =>
 			{
 				let block = panel().title_bottom(" Game over ");
+				let result = match o
+				{
+					Outcome::Tiger => format!("{} win!", side_name(Turn::Tiger)),
+					Outcome::Sheep => format!("{} win!", side_name(Turn::Sheep)),
+					Outcome::Draw => "Draw by repetition!".to_string(),
+				};
 				let text = vec![
-					Line::styled(format!("{} win!", side_name(w)), Style::new().add_modifier(Modifier::BOLD)),
+					Line::styled(result, Style::new().add_modifier(Modifier::BOLD)),
 					Line::from("Click a move to revert to it, or press q to quit."),
 				];
 				frame.render_widget(Paragraph::new(text).block(block), current_pane);
@@ -247,7 +265,7 @@ impl GameHandler
 		let view = BoardView
 		{
 			board: self.board(),
-			highlights: if winner.is_none() { player.highlights() } else { Default::default() },
+			highlights: if outcome.is_none() { player.highlights() } else { Default::default() },
 			last_move: self.history.last().map(|&(m, _)| m),
 		};
 		frame.render_widget(&view, padded);
@@ -318,7 +336,7 @@ mod tests
 	}
 
 	use ratatui::{backend::TestBackend, crossterm::event::{MouseEvent, KeyEvent}, Terminal};
-	use crate::{claude_player::ClaudePlayer, local_player::LocalPlayer};
+	use crate::{board::PieceType, claude_player::ClaudePlayer, local_player::LocalPlayer};
 
 	fn draw(game: &mut GameHandler, players: &[&mut dyn Player; 2]) -> Terminal<TestBackend>
 	{
@@ -394,7 +412,7 @@ mod tests
 		let mut sheep = LocalPlayer::default();
 		let mut tiger = ClaudePlayer::new(std::time::Duration::from_millis(50));
 		game.play(Move::PlaceSheep { pos: (2, 2) });
-		let m = tiger.pick_move(game.board(), game.turn()).unwrap();
+		let m = tiger.pick_move(game.board(), game.turn(), &[]).unwrap();
 		game.play(m);
 
 		let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
@@ -419,6 +437,66 @@ mod tests
 	#[test]
 	fn no_winner_at_the_start()
 	{
-		assert_eq!(GameHandler::default().winner(), None);
+		assert_eq!(GameHandler::default().outcome(), None);
+	}
+
+	/// Movement phase with 16 sheep: tigers in the corners, and sheep filling rows 1 to 4 except
+	/// c4 and c1, with a sheep at b4 free to step to c4 and the tiger at a5 free to step to b5.
+	fn movement_game() -> GameHandler
+	{
+		let mut start = GameBoard::EMPTY;
+		for pos in [(0, 0), (4, 0), (0, 4), (4, 4)]
+		{
+			start.set(pos, PieceType::Tiger);
+		}
+		for y in 1..5
+		{
+			for x in 0..5
+			{
+				if matches!(start.get((x, y)), PieceType::Empty) && (x, y) != (2, 1) && (x, y) != (2, 4)
+				{
+					start.set((x, y), PieceType::Sheep);
+				}
+			}
+		}
+		assert_eq!((start.sheep_count(), start.sheep_left()), (16, 0));
+		GameHandler { start, ..Default::default() }
+	}
+
+	/// The sheep at b4 and the tiger at a5 step out and back.
+	const SHUFFLE: [Move; 4] = [
+		Move::MoveSheep { from: (1, 1), to: (2, 1) },
+		Move::MoveTiger { from: (0, 0), to: (1, 0) },
+		Move::MoveSheep { from: (2, 1), to: (1, 1) },
+		Move::MoveTiger { from: (1, 0), to: (0, 0) },
+	];
+
+	#[test]
+	fn third_repetition_is_a_draw()
+	{
+		let mut game = movement_game();
+		for (i, &m) in SHUFFLE.iter().cycle().take(8).enumerate()
+		{
+			assert_eq!(game.outcome(), None, "before move {i}");
+			game.play(m);
+		}
+		// The start position, for the third time
+		assert_eq!(game.board(), game.start);
+		assert_eq!(game.outcome(), Some(Outcome::Draw));
+		assert_eq!(game.previous().len(), 8);
+
+		game.revert(7);
+		assert_eq!(game.outcome(), None);
+	}
+
+	#[test]
+	fn game_over_panel_shows_a_draw()
+	{
+		let mut game = movement_game();
+		SHUFFLE.iter().cycle().take(8).for_each(|&m| game.play(m));
+		let (mut sheep, mut tiger) = (LocalPlayer::default(), LocalPlayer::default());
+		let terminal = draw(&mut game, &[&mut sheep, &mut tiger]);
+		let screen = format!("{:?}", terminal.backend().buffer());
+		assert!(screen.contains("Draw by repetition!"), "{screen}");
 	}
 }

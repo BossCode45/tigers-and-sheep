@@ -2,7 +2,7 @@ use std::{path::PathBuf, time::Duration};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-use crate::{claude_player::ClaudePlayer, game::GameHandler, local_player::LocalPlayer, network::Network, neural_player::NeuralPlayer, player::Player};
+use crate::{board::Outcome, claude_player::ClaudePlayer, game::GameHandler, local_player::LocalPlayer, network::Network, neural_player::NeuralPlayer, player::Player};
 
 mod board;
 mod player;
@@ -218,9 +218,12 @@ fn play(args: PlayArgs) -> std::io::Result<()>
 	let mut sheep = make_player(args.sheep, time_limit)?;
 	let mut tiger = make_player(args.tiger, time_limit)?;
 	let mut game = GameHandler::default();
-	if let Some(winner) = game.play_game(sheep.as_mut(), tiger.as_mut())?
+	match game.play_game(sheep.as_mut(), tiger.as_mut())?
 	{
-		println!("{winner:?} wins!");
+		Some(Outcome::Tiger) => println!("Tigers win!"),
+		Some(Outcome::Sheep) => println!("Sheep win!"),
+		Some(Outcome::Draw) => println!("Draw by repetition."),
+		None => (),
 	}
 	Ok(())
 }

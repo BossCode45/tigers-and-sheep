@@ -23,7 +23,7 @@ fn find_position(plies: usize) -> (GameBoard, Turn)
 	for _ in 0..plies
 	{
 		assert!(!board.check_win(turn), "the self-play game ended before ply {plies}");
-		board.make_move_unchecked(player.pick_move(board, turn).expect("a move"));
+		board.make_move_unchecked(player.pick_move(board, turn, &[]).expect("a move"));
 		turn = turn.next_turn();
 	}
 	(board, turn)
@@ -44,7 +44,7 @@ pub fn run(depth: usize)
 		player.max_depth = depth;
 		SearchStats::take();
 		let start = Instant::now();
-		let m = player.pick_move(board, turn).expect("a move");
+		let m = player.pick_move(board, turn, &[]).expect("a move");
 		let time = start.elapsed();
 		let stats = SearchStats::take();
 		total_time += time;
@@ -65,6 +65,7 @@ fn add(total: &mut SearchStats, s: &SearchStats)
 	total.nodes += s.nodes;
 	total.leaves += s.leaves;
 	total.terminal += s.terminal;
+	total.repetitions += s.repetitions;
 	total.cache_probes += s.cache_probes;
 	total.cache_hits += s.cache_hits;
 	total.cache_returns += s.cache_returns;
@@ -81,8 +82,8 @@ fn print_stats(s: &SearchStats, time: Duration)
 		return;
 	}
 	let pct = |a: u64, b: u64| if b == 0 { 0.0 } else { 100.0 * a as f64 / b as f64 };
-	println!("    {} nodes ({:.2} M/s), {} leaves, {} terminal, {:.2} move gens/node",
-		s.nodes, s.nodes as f64 / time.as_secs_f64() / 1e6, s.leaves, s.terminal,
+	println!("    {} nodes ({:.2} M/s), {} leaves, {} terminal, {} repetitions, {:.2} move gens/node",
+		s.nodes, s.nodes as f64 / time.as_secs_f64() / 1e6, s.leaves, s.terminal, s.repetitions,
 		s.move_gens as f64 / s.nodes.max(1) as f64);
 	println!("    cache: {} probes, {:.1}% hit, {:.1}% of hits settle the score, {} overwrites; cutoffs: {}, {:.1}% on the first move",
 		s.cache_probes, pct(s.cache_hits, s.cache_probes), pct(s.cache_returns, s.cache_hits), s.cache_overwrites,

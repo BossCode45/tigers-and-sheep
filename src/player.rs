@@ -2,7 +2,7 @@ use std::{collections::HashMap, time::{Duration, Instant}};
 
 use ratatui::{buffer::Buffer, crossterm::event::KeyEvent, layout::Rect, widgets::{Paragraph, Widget, Wrap}};
 
-use crate::board::{inverse_symmetry, is_jump, transform_move, GameBoard, Move, Pos, Turn};
+use crate::board::{inverse_symmetry, is_jump, repetitions, transform_move, GameBoard, Move, Pos, Turn};
 
 /// Input the game coordinator passes on to the player whose turn it is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,8 +31,9 @@ pub trait Player
 	fn update(&mut self, _board: GameBoard, _turn: Turn) {}
 
 	/// Computer players search here and return Some. Interactive players return None and
-	/// wait for `handle_input`.
-	fn pick_move(&mut self, _board: GameBoard, _turn: Turn) -> Option<Move> { None }
+	/// wait for `handle_input`. `previous` is the game's boards before this one, oldest first,
+	/// for spotting repetitions.
+	fn pick_move(&mut self, _board: GameBoard, _turn: Turn, _previous: &[GameBoard]) -> Option<Move> { None }
 
 	/// A click on a board point, or a key press, while it's this player's turn.
 	fn handle_input(&mut self, _input: Input, _board: GameBoard, _turn: Turn) -> Option<Move> { None }
@@ -267,6 +268,8 @@ pub struct SearchStats
 	pub leaves: u64,
 	/// Positions where `check_win` ended the search.
 	pub terminal: u64,
+	/// Positions scored as a draw because they repeat an earlier one.
+	pub repetitions: u64,
 	pub cache_probes: u64,
 	pub cache_hits: u64,
 	/// Cache hits whose bounds settled the score without searching.
@@ -313,11 +316,23 @@ impl SearchStats
 pub trait MinimaxPlayer
 {
 	const WIN: f32 = f32::INFINITY;
+	/// The score of a position that repeats one on `path`.
+	const DRAW: f32 = 0.0;
 
 	/// Scores outside `alpha..beta` are only bounds: at most `alpha`, or at least `beta`.
+	/// `path` is the boards before this one, in the game and then in the search, oldest first.
 	/// Returns None if `deadline` passed before the search finished.
+	#[allow(clippy::too_many_arguments)]
 	fn minimax(&mut self, board: GameBoard, turn: Turn, depth: usize,
-			   mut alpha: ScoreType, mut beta: ScoreType, deadline: Option<Instant>) -> Option<ScoreType> {
+			   mut alpha: ScoreType, mut beta: ScoreType, deadline: Option<Instant>, path: &mut Vec<GameBoard>) -> Option<ScoreType> {
+		// A side that can repeat a position once can repeat it until the game is drawn, so the
+		// first repetition already scores as a draw. The cache doesn't know the path, so an entry
+		// that came from a repetition can be slightly wrong for the same board reached another way.
+		if repetitions(path, &board) > 0
+		{
+			count!(repetitions);
+			return Some(Self::DRAW);
+		}
 		// Symmetric boards are equally good, so they share an entry, under the canonical board.
 		// Entries' best moves are stored as played on that board, and turned back for this one.
 		let (canon, sym) = if self.cache().is_some() { board.canonical() } else { (board, 0) };
@@ -346,7 +361,7 @@ pub trait MinimaxPlayer
 		{
 			hint = self.cache().and_then(|c| { count!(cache_probes); c.lookup(&canon, turn, depth - 1) }).and_then(|e| e.best).map(back);
 		}
-		let (score, best) = self.minimax_uncached(board, turn, depth, alpha, beta, hint, deadline)?;
+		let (score, best) = self.minimax_uncached(board, turn, depth, alpha, beta, hint, deadline, path)?;
 		if let Some(c) = self.cache()
 		{
 			let best = best.map(|m| transform_move(m, sym));
@@ -376,9 +391,10 @@ pub trait MinimaxPlayer
 
 	/// The score and the move that gave it (None at a leaf), trying `hint` first if it is legal.
 	/// Returns None if `deadline` passed before the search finished.
+	#[allow(clippy::too_many_arguments)]
 	fn minimax_uncached(&mut self, board: GameBoard, turn: Turn, depth: usize,
 						mut alpha: ScoreType, mut beta: ScoreType,
-						hint: Option<Move>, deadline: Option<Instant>) -> Option<(ScoreType, Option<Move>)> {
+						hint: Option<Move>, deadline: Option<Instant>, path: &mut Vec<GameBoard>) -> Option<(ScoreType, Option<Move>)> {
 		count!(nodes);
 		if board.check_win(turn)
 		{
@@ -423,7 +439,10 @@ pub trait MinimaxPlayer
 		let mut best: Option<(ScoreType, Move)> = None;
 		for (_i, m) in moves.into_iter().enumerate()
 		{
-			let score = self.minimax(board.after_move_unchecked(m), next, depth - 1, alpha, beta, deadline)?;
+			path.push(board);
+			let score = self.minimax(board.after_move_unchecked(m), next, depth - 1, alpha, beta, deadline, path);
+			path.pop();
+			let score = score?;
 			let better = match best
 			{
 				None => true,
@@ -500,7 +519,7 @@ impl<P: MinimaxPlayer> Player for P
 
 	/// Iterative deepening: searches depth 1, 2, … until time runs out, each depth trying the
 	/// previous one's best moves first, and plays the best move from the deepest finished search.
-	fn pick_move(&mut self, board: GameBoard, turn: Turn) -> Option<Move> {
+	fn pick_move(&mut self, board: GameBoard, turn: Turn, previous: &[GameBoard]) -> Option<Move> {
 		let start = Instant::now();
 		let time_limit = self.time_limit();
 		let deadline = start + time_limit;
@@ -513,6 +532,7 @@ impl<P: MinimaxPlayer> Player for P
 		{
 			k.clear();
 		}
+		let mut path = previous.to_vec();
 		let mut best = None;
 		let mut report = None;
 		for depth in 1..=self.depth().max(1)
@@ -520,7 +540,7 @@ impl<P: MinimaxPlayer> Player for P
 			// Depth 1 ignores the deadline, so there is always a move to play
 			let dl = (depth > 1).then_some(deadline);
 			// Out of time: drop the partial search and keep the last finished one's move
-			let Some((score, m)) = self.minimax_uncached(board, turn, depth, f32::NEG_INFINITY, f32::INFINITY, best, dl)
+			let Some((score, m)) = self.minimax_uncached(board, turn, depth, f32::NEG_INFINITY, f32::INFINITY, best, dl, &mut path)
 			else
 			{
 				break;
@@ -650,6 +670,16 @@ mod tests
 	/// Plain minimax with no pruning or cache, to check the real search against.
 	fn reference(player: &mut TestPlayer, board: GameBoard, turn: Turn, depth: usize) -> ScoreType
 	{
+		reference_from(player, board, turn, depth, &mut Vec::new())
+	}
+
+	/// `reference` with `path` the boards before this one, like `minimax`'s.
+	fn reference_from(player: &mut TestPlayer, board: GameBoard, turn: Turn, depth: usize, path: &mut Vec<GameBoard>) -> ScoreType
+	{
+		if repetitions(path, &board) > 0
+		{
+			return TestPlayer::DRAW;
+		}
 		if board.check_win(turn)
 		{
 			return match turn { Turn::Tiger => -TestPlayer::WIN, Turn::Sheep => TestPlayer::WIN };
@@ -658,12 +688,15 @@ mod tests
 		{
 			return player.evaluate(&board, turn);
 		}
-		let scores = board.get_moves(turn).into_iter()
-			.map(|m| reference(player, board.after_move_unchecked(m), turn.next_turn(), depth - 1));
+		path.push(board);
+		let scores: Vec<ScoreType> = board.get_moves(turn).into_iter()
+			.map(|m| reference_from(player, board.after_move_unchecked(m), turn.next_turn(), depth - 1, path))
+			.collect();
+		path.pop();
 		match turn
 		{
-			Turn::Tiger => scores.fold(f32::NEG_INFINITY, f32::max),
-			Turn::Sheep => scores.fold(f32::INFINITY, f32::min),
+			Turn::Tiger => scores.into_iter().fold(f32::NEG_INFINITY, f32::max),
+			Turn::Sheep => scores.into_iter().fold(f32::INFINITY, f32::min),
 		}
 	}
 
@@ -703,7 +736,7 @@ mod tests
 			{
 				let mut player = TestPlayer::new(depth, CacheKind::None);
 				let expected = reference(&mut player, board, turn, depth);
-				let score = player.minimax(board, turn, depth, f32::NEG_INFINITY, f32::INFINITY, None).unwrap();
+				let score = player.minimax(board, turn, depth, f32::NEG_INFINITY, f32::INFINITY, None, &mut Vec::new()).unwrap();
 				assert_eq!(score, expected, "depth {depth}, {turn:?} to move");
 			}
 		}
@@ -722,7 +755,7 @@ mod tests
 					{
 						let mut player = TestPlayer::new(depth, kind).with_killers(killers);
 						let expected = reference(&mut player, board, turn, depth);
-						let score = player.minimax(board, turn, depth, f32::NEG_INFINITY, f32::INFINITY, None).unwrap();
+						let score = player.minimax(board, turn, depth, f32::NEG_INFINITY, f32::INFINITY, None, &mut Vec::new()).unwrap();
 						assert_eq!(score, expected, "depth {depth}, {turn:?} to move, {kind:?}, killers {killers}");
 					}
 				}
@@ -742,7 +775,7 @@ mod tests
 				for kind in CACHED
 				{
 					let mut player = TestPlayer::new(3, kind).with_killers(true);
-					let (score, _) = player.minimax_uncached(board, turn, 3, f32::NEG_INFINITY, f32::INFINITY, Some(hint), None).unwrap();
+					let (score, _) = player.minimax_uncached(board, turn, 3, f32::NEG_INFINITY, f32::INFINITY, Some(hint), None, &mut Vec::new()).unwrap();
 					assert_eq!(score, expected, "{turn:?} to move, hint {hint:?}, {kind:?}");
 				}
 			}
@@ -756,7 +789,7 @@ mod tests
 		{
 			let mut player = TestPlayer::new(3, kind);
 			let past = Instant::now();
-			assert_eq!(player.minimax(GameBoard::default(), Turn::Sheep, 3, f32::NEG_INFINITY, f32::INFINITY, Some(past)), None);
+			assert_eq!(player.minimax(GameBoard::default(), Turn::Sheep, 3, f32::NEG_INFINITY, f32::INFINITY, Some(past), &mut Vec::new()), None);
 			// The root gives up before searching any move, so its entry is the only one there could be
 			assert_eq!(player.cache.unwrap().lookup(&GameBoard::default(), Turn::Sheep, 3), None, "{kind:?}");
 		}
@@ -769,7 +802,7 @@ mod tests
 		player.time_limit = Duration::from_millis(50);
 		let board = GameBoard::default();
 		let start = Instant::now();
-		let m = player.pick_move(board, Turn::Sheep).unwrap();
+		let m = player.pick_move(board, Turn::Sheep, &[]).unwrap();
 		assert!(start.elapsed() < Duration::from_millis(500), "took {:?}", start.elapsed());
 		assert_eq!(board.check_move(m), Ok(()));
 	}
@@ -785,11 +818,70 @@ mod tests
 				{
 					let mut player = TestPlayer::new(4, kind).with_killers(killers);
 					let best = reference(&mut player, board, turn, 4);
-					let m = player.pick_move(board, turn).unwrap();
+					let m = player.pick_move(board, turn, &[]).unwrap();
 					let score = reference(&mut player, board.after_move_unchecked(m), turn.next_turn(), 3);
 					assert_eq!(score, best, "{turn:?} picked {m:?} ({kind:?}, killers {killers})");
 				}
 			}
+		}
+	}
+
+	/// A movement-phase position with `turn` to move and at least one sheep dead, so the
+	/// evaluation is well above the draw score, and at least two moves.
+	fn sheep_down_position(turn: Turn) -> (GameBoard, Turn)
+	{
+		(41..80).flat_map(|plies| (1..20).filter_map(move |seed| position(plies, seed)))
+			.find(|&(board, t)| t == turn && board.sheep_left() == 0 && board.sheep_count() < 20
+				&& board.get_moves(t).len() >= 2)
+			.expect("a position with a sheep down")
+	}
+
+	/// A history in which the board after `m` came up before, with the same side to move:
+	/// that board, then `board`, then that board again.
+	fn history_repeating(board: GameBoard, m: Move) -> Vec<GameBoard>
+	{
+		let after = board.after_move_unchecked(m);
+		vec![after, board, after]
+	}
+
+	#[test]
+	fn search_scores_a_repeated_position_as_a_draw()
+	{
+		let (board, turn) = sheep_down_position(Turn::Tiger);
+		let m = board.get_moves(turn)[0];
+		let mut path = history_repeating(board, m);
+		path.push(board);
+		let mut player = TestPlayer::new(3, CacheKind::None);
+		assert_eq!(player.minimax(board.after_move_unchecked(m), turn.next_turn(), 3,
+			f32::NEG_INFINITY, f32::INFINITY, None, &mut path), Some(TestPlayer::DRAW));
+		assert_eq!(path.len(), 4, "the search leaves the path as it found it");
+	}
+
+	#[test]
+	fn tiger_ahead_avoids_a_repetition()
+	{
+		let (board, turn) = sheep_down_position(Turn::Tiger);
+		for kind in ALL_CACHES
+		{
+			let m = TestPlayer::new(3, kind).pick_move(board, turn, &[]).unwrap();
+			assert!(reference(&mut TestPlayer::new(3, kind), board.after_move_unchecked(m), turn.next_turn(), 2) > TestPlayer::DRAW);
+			let previous = history_repeating(board, m);
+			let again = TestPlayer::new(3, kind).pick_move(board, turn, &previous).unwrap();
+			assert_ne!(again, m, "{kind:?}");
+		}
+	}
+
+	#[test]
+	fn sheep_behind_takes_a_repetition()
+	{
+		let (board, turn) = sheep_down_position(Turn::Sheep);
+		for kind in ALL_CACHES
+		{
+			let best = TestPlayer::new(3, kind).pick_move(board, turn, &[]).unwrap();
+			assert!(reference(&mut TestPlayer::new(3, kind), board.after_move_unchecked(best), turn.next_turn(), 2) > TestPlayer::DRAW);
+			let m = *board.get_moves(turn).iter().find(|&&m| m != best).unwrap();
+			let previous = history_repeating(board, m);
+			assert_eq!(TestPlayer::new(3, kind).pick_move(board, turn, &previous), Some(m), "{kind:?}");
 		}
 	}
 
@@ -819,7 +911,7 @@ mod tests
 
 		for kind in ALL_CACHES
 		{
-			let m = TestPlayer::new(3, kind).pick_move(board, Turn::Tiger).unwrap();
+			let m = TestPlayer::new(3, kind).pick_move(board, Turn::Tiger, &[]).unwrap();
 			assert!(board.after_move_unchecked(m).check_win(Turn::Sheep), "picked {m:?} ({kind:?})");
 		}
 	}
