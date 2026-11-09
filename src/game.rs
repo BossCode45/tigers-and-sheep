@@ -212,14 +212,15 @@ impl GameHandler
 			Some(o) =>
 			{
 				let block = panel().title_bottom(" Game over ");
-				let result = match o
+				// A win in green, a draw in yellow
+				let (result, colour) = match o
 				{
-					Outcome::Tiger => format!("{} win!", side_name(Turn::Tiger)),
-					Outcome::Sheep => format!("{} win!", side_name(Turn::Sheep)),
-					Outcome::Draw => "Draw by repetition!".to_string(),
+					Outcome::Tiger => (format!("{} ({}) win!", side_name(Turn::Tiger), players[1].name()), Color::Green),
+					Outcome::Sheep => (format!("{} ({}) win!", side_name(Turn::Sheep), players[0].name()), Color::Green),
+					Outcome::Draw => ("Draw by repetition!".to_string(), Color::Yellow),
 				};
 				let text = vec![
-					Line::styled(result, Style::new().add_modifier(Modifier::BOLD)),
+					Line::styled(result, Style::new().fg(colour).add_modifier(Modifier::BOLD)),
 					Line::from("Click a move to revert to it, or press q to quit."),
 				];
 				frame.render_widget(Paragraph::new(text).block(block), current_pane);
@@ -498,5 +499,38 @@ mod tests
 		let terminal = draw(&mut game, &[&mut sheep, &mut tiger]);
 		let screen = format!("{:?}", terminal.backend().buffer());
 		assert!(screen.contains("Draw by repetition!"), "{screen}");
+		assert_result_style(&terminal, "Draw by repetition!", Color::Yellow);
+	}
+
+	#[test]
+	fn game_over_panel_shows_the_winner_in_green()
+	{
+		// Only 15 sheep left, so the tigers have won
+		let mut game = movement_game();
+		game.start.set((0, 1), PieceType::Empty);
+		assert_eq!(game.outcome(), Some(Outcome::Tiger));
+		let mut sheep = LocalPlayer::default();
+		let mut tiger = ClaudePlayer::new(std::time::Duration::from_millis(50));
+		let terminal = draw(&mut game, &[&mut sheep, &mut tiger]);
+		assert_result_style(&terminal, "Tigers (Claude) win!", Color::Green);
+	}
+
+	/// Every cell of `text` on screen is bold and in `colour`.
+	fn assert_result_style(terminal: &Terminal<TestBackend>, text: &str, colour: Color)
+	{
+		let buf = terminal.backend().buffer();
+		let area = buf.area;
+		let found = (0..area.height).find_map(|y|
+		{
+			let row: String = (0..area.width).map(|x| buf[(x, y)].symbol()).collect();
+			row.find(text).map(|i| (row[..i].chars().count() as u16, y))
+		});
+		let (x0, y) = found.unwrap_or_else(|| panic!("{text} isn't on screen"));
+		for x in x0..x0 + text.chars().count() as u16
+		{
+			let cell = &buf[(x, y)];
+			assert_eq!(cell.fg, colour, "{text} at column {x}");
+			assert!(cell.modifier.contains(Modifier::BOLD), "{text} at column {x}");
+		}
 	}
 }

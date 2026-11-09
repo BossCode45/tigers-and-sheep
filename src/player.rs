@@ -581,7 +581,7 @@ impl<P: MinimaxPlayer> Player for P
 		}
 		else
 		{
-			format!("{:+.1} (+ favours tigers)", r.score)
+			format!("{} (+ favours tigers)", significant(r.score, 5))
 		};
 		Paragraph::new(format!("Played {}\nSearched to depth {}\nScore: {score}", r.mv, r.depth))
 			.wrap(Wrap { trim: true }).render(area, buf);
@@ -589,11 +589,48 @@ impl<P: MinimaxPlayer> Player for P
     
 }
 
+/// `x` to `digits` significant figures, with its sign: 1234.5678 to 5 is "+1234.6", 0.012345678
+/// is "+0.012346", and 1234567 is "+1234600".
+fn significant(x: f32, digits: usize) -> String
+{
+	if x == 0.0
+	{
+		return format!("{:.*}", digits.saturating_sub(1), 0.0);
+	}
+	// The power of ten of the first significant digit
+	let magnitude = (x.abs() as f64).log10().floor() as i32;
+	let decimals = digits as i32 - 1 - magnitude;
+	if decimals >= 0
+	{
+		// Rounding can carry into a new digit (9.99999 to 10.000), which needs one decimal fewer
+		let rounded = format!("{:+.*}", decimals as usize, x);
+		let carried = rounded.trim_start_matches(['+', '-']).trim_start_matches(['0', '.']).chars().filter(char::is_ascii_digit).count() > digits;
+		if carried && decimals > 0 { format!("{:+.*}", decimals as usize - 1, x) } else { rounded }
+	}
+	else
+	{
+		let unit = 10f64.powi(-decimals);
+		format!("{:+.0}", (x as f64 / unit).round() * unit)
+	}
+}
+
 #[cfg(test)]
 mod tests
 {
 	use super::*;
 	use crate::board::PieceType;
+
+	#[test]
+	fn significant_keeps_five_figures()
+	{
+		assert_eq!(significant(1234.5678, 5), "+1234.6");
+		assert_eq!(significant(-212.0, 5), "-212.00");
+		assert_eq!(significant(0.012345678, 5), "+0.012346");
+		assert_eq!(significant(-0.5, 5), "-0.50000");
+		assert_eq!(significant(1234567.0, 5), "+1234600");
+		assert_eq!(significant(9.999999, 5), "+10.000");
+		assert_eq!(significant(0.0, 5), "0.0000");
+	}
 
 	/// A minimax player with a cheap evaluation that still varies a lot between positions.
 	struct TestPlayer
